@@ -32,17 +32,22 @@ local TREE_NAME = {
 
 local COLS = {
 	{ key = "t", text = "Time", x = 8, w = 50 },
-	{ key = "class", text = "Class", x = 60, w = 150 },
-	{ key = "kpm", text = "K/min", x = 212, w = 50 },
-	{ key = "xpm", text = "XP/min", x = 264, w = 54 },
-	{ key = "gpm", text = "G/min", x = 320, w = 50 },
-	{ key = "dps", text = "DPS", x = 372, w = 58 },
-	{ key = "bosses", text = "Boss", x = 432, w = 40 },
-	{ key = "guardians", text = "Guard", x = 474, w = 46 },
-	{ key = "elites", text = "Elite", x = 522, w = 46 },
-	{ key = "lvl", text = "Lvl", x = 570, w = 32 },
-	{ key = "race", text = "Race", x = 604, w = 46 },
+	{ key = "class", text = "Class", x = 60, w = 74 },
+	{ key = "map", text = "Map", x = 136, w = 100 },
+	{ key = "diff", text = "Diff", x = 240, w = 72 },
+	{ key = "kpm", text = "K/min", x = 316, w = 50 },
+	{ key = "xpm", text = "XP/min", x = 368, w = 54 },
+	{ key = "gpm", text = "G/min", x = 424, w = 50 },
+	{ key = "dps", text = "DPS", x = 476, w = 58 },
+	{ key = "bosses", text = "Boss", x = 536, w = 40 },
+	{ key = "guardians", text = "Guard", x = 578, w = 46 },
+	{ key = "elites", text = "Elite", x = 626, w = 46 },
+	{ key = "lvl", text = "Lvl", x = 674, w = 32 },
+	{ key = "race", text = "Race", x = 708, w = 62 },
 }
+
+local FRAME_W = 880
+local ROMAN = { "I", "II", "III", "IV", "V" }
 
 local STAT_KEYS = {
 	"crit", "cm", "dmg", "haste", "doth",
@@ -59,7 +64,7 @@ local anchorCache = nil
 local anchorAt = 0
 
 local frame, sub, filters, headers, rows, foot, prevBtn, nextBtn, pageText
-local mapBtn, specBtn, windowBtn, classBtn
+local mapBtn, diffBtn, windowBtn, classBtn, diffMenu
 local pop, popTitle, popScroll, popChild, popSlider, statBtn
 local PlaceDetails
 local PlaceWindow
@@ -229,8 +234,17 @@ end
 
 local function DiffName(h)
 	h = math.floor(Num(h))
-	if h <= 0 then return "Normal" end
-	return "Heroic " .. h
+	if h < 0 then return "Any difficulty" end
+	if h == 0 then return "Normal" end
+	if h > 5 then h = 5 end
+	return "Heroic " .. (ROMAN[h] or tostring(h))
+end
+
+local function DiffLevel(h)
+	h = math.floor(Num(h))
+	if h < 0 then h = 0 end
+	if h > 5 then h = 5 end
+	return h
 end
 
 local function Phase()
@@ -1914,6 +1928,14 @@ local function ViewClass(ctx)
 	return ctx.class or ""
 end
 
+local function ViewDiff(ctx)
+	if RunStatsDB and RunStatsDB.diff ~= nil then
+		if Num(RunStatsDB.diff) < 0 then return -1 end
+		return DiffLevel(RunStatsDB.diff)
+	end
+	return DiffLevel(ctx and ctx.heroic)
+end
+
 local function KnownClasses()
 	local list = {}
 	local have = {}
@@ -1994,12 +2016,16 @@ local function Consider(list, rec, sheet)
 		split = split,
 		race = (type(rec.rname) == "string" and rec.rname ~= "" and rec.rname) or rec.race or "",
 		className = ClassName(rec.class, rec.cname),
+		mapName = (type(rec.zname) == "string" and rec.zname ~= "" and rec.zname) or Pretty(rec.zone),
+		diffName = DiffName(rec.heroic),
+		heroic = DiffLevel(rec.heroic),
 	})
 end
 
 local function Collect()
 	local ctx = Anchor()
 	local class = ViewClass(ctx)
+	local diff = ViewDiff(ctx)
 	local full = RunStatsDB.full == 1
 	local list = {}
 	local runs = RunStatsDB.runs
@@ -2011,7 +2037,7 @@ local function Collect()
 		if rec.party ~= 1 and sheet and longEnough then
 			local classOk = (class == "" or rec.class == class or not rec.class or rec.class == "")
 			local mapOk = RunStatsDB.allMaps == 1 or ctx.zone == "" or not rec.zone or rec.zone == "" or rec.zone == ctx.zone
-			local diffOk = Num(rec.heroic) == Num(ctx.heroic)
+			local diffOk = diff < 0 or DiffLevel(rec.heroic) == diff
 			if mapOk and diffOk and classOk then
 				Consider(list, rec, sheet)
 			end
@@ -2024,10 +2050,19 @@ local function Collect()
 	end
 	table.sort(list, function(a, b)
 		local av, bv
-		if key == "class" or key == "race" then
+		if key == "diff" then
+			av = Num(a.heroic)
+			bv = Num(b.heroic)
+			if av == bv then return a.rates.kpm > b.rates.kpm end
+			return av < bv
+		end
+		if key == "class" or key == "race" or key == "map" then
 			if key == "race" then
 				av = a.race or ""
 				bv = b.race or ""
+			elseif key == "map" then
+				av = a.mapName or ""
+				bv = b.mapName or ""
 			else
 				av = a.className or ""
 				bv = b.className or ""
@@ -2687,9 +2722,11 @@ local function Refresh()
 	if RunStatsDB.allClasses == 1 then cname = "All classes" end
 	local windowLabel = "First 20 min"
 	if RunStatsDB.full == 1 then windowLabel = "Full run" end
-	sub:SetText(cname .. "  ·  " .. (ctx.zname or "No map") .. "  ·  " .. DiffName(ctx.heroic))
+	local diff = ViewDiff(ctx)
+	sub:SetText(cname .. "  ·  " .. (ctx.zname or "No map") .. "  ·  " .. DiffName(diff))
 	classBtn.label:SetText(Cap(cname, 16))
 	mapBtn.label:SetText(RunStatsDB.allMaps == 1 and "All maps" or "This map")
+	if diffBtn then diffBtn.label:SetText(DiffName(diff)) end
 	windowBtn.label:SetText(windowLabel)
 	if frame.paceBtn then
 		if RunStatsDB.lastMin == 1 then
@@ -2717,7 +2754,11 @@ local function Refresh()
 				if col.key == "t" then
 					text = TimeText(item)
 				elseif col.key == "class" then
-					text = Cap(item.className or "", 22)
+					text = Cap(item.className or "", 12)
+				elseif col.key == "map" then
+					text = Cap(item.mapName or "", 16)
+				elseif col.key == "diff" then
+					text = item.diffName or ""
 				elseif col.key == "race" then
 					text = item.race or ""
 				else
@@ -2753,11 +2794,18 @@ local function Refresh()
 	PaintHeaders()
 end
 
+local ToggleDiffMenu
+
+local function HideDiffMenu()
+	if diffMenu then diffMenu:Hide() end
+end
+
 local function Toggle()
 	if not frame then return end
 	if frame:IsShown() then
 		SavePlace()
 		frame:Hide()
+		HideDiffMenu()
 		if pop then pop:Hide() end
 		if ask then ask:Hide() end
 		if AZS_SetOnTopOfScreens then
@@ -2766,6 +2814,7 @@ local function Toggle()
 			pcall(AZS_SetOnTopOfScreens, "RunStatsConfirm", false)
 		end
 	else
+		HideDiffMenu()
 		anchorCache = nil
 		local id = RunId()
 		local rec = id and FindRun(id)
@@ -2857,6 +2906,48 @@ local function MakeButton(parent, w, h)
 	return b
 end
 
+ToggleDiffMenu = function()
+	if not diffBtn then return end
+	if not diffMenu then
+		diffMenu = CreateFrame("Frame", "RunStatsDiffMenu", UIParent)
+		diffMenu:SetWidth(114)
+		diffMenu:SetHeight(7 * 20 + 8)
+		diffMenu:SetFrameStrata("TOOLTIP")
+		diffMenu:SetBackdrop({
+			bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+			tile = true, tileSize = 8, edgeSize = 8,
+			insets = { left = 2, right = 2, top = 2, bottom = 2 },
+		})
+		diffMenu:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+		diffMenu:SetBackdropBorderColor(0.9, 0.75, 0.25, 0.95)
+		diffMenu:EnableMouse(true)
+		diffMenu:Hide()
+		local i
+		for i = -1, 5 do
+			local b = MakeButton(diffMenu, 104, 18)
+			b:SetPoint("TOPLEFT", diffMenu, "TOPLEFT", 5, -4 - (i + 1) * 20)
+			b.diff = i
+			b.label:SetText(DiffName(i))
+			b:SetScript("OnClick", function()
+				RunStatsDB.diff = this.diff
+				HideDiffMenu()
+				page = 1
+				anchorCache = nil
+				Refresh()
+			end)
+		end
+	end
+	if diffMenu:IsShown() then
+		HideDiffMenu()
+		return
+	end
+	diffMenu:ClearAllPoints()
+	diffMenu:SetPoint("TOPLEFT", diffBtn, "BOTTOMLEFT", 0, -2)
+	diffMenu:Show()
+	diffMenu:Raise()
+end
+
 PlaceDetails = function()
 	if not pop or not frame then return end
 	pop:ClearAllPoints()
@@ -2872,7 +2963,7 @@ PlaceWindow = function()
 		if GetScreenWidth then sw = GetScreenWidth() end
 		local sh = 768
 		if GetScreenHeight then sh = GetScreenHeight() end
-		local left = (sw - (760 + 6 + 480)) / 2
+		local left = (sw - (FRAME_W + 6 + 480)) / 2
 		if left < 12 then left = 12 end
 		local top = (sh / 2) + (430 / 2) + 40
 		frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
@@ -2983,9 +3074,130 @@ local function DoDelete()
 	Refresh()
 end
 
+local function BuildFilters()
+	classBtn = MakeButton(frame, 110, 20)
+	classBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -46)
+	classBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		if RunStatsDB.allClasses == 1 then RunStatsDB.allClasses = nil else RunStatsDB.allClasses = 1 end
+		page = 1
+		anchorCache = nil
+		Refresh()
+	end)
+
+	mapBtn = MakeButton(frame, 84, 20)
+	mapBtn:SetPoint("LEFT", classBtn, "RIGHT", 6, 0)
+	mapBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		if RunStatsDB.allMaps == 1 then RunStatsDB.allMaps = nil else RunStatsDB.allMaps = 1 end
+		page = 1
+		Refresh()
+	end)
+
+	diffBtn = MakeButton(frame, 104, 20)
+	diffBtn:SetPoint("LEFT", mapBtn, "RIGHT", 6, 0)
+	diffBtn.label:SetText("Normal")
+	diffBtn:SetScript("OnClick", function() ToggleDiffMenu() end)
+
+	windowBtn = MakeButton(frame, 100, 20)
+	windowBtn:SetPoint("LEFT", diffBtn, "RIGHT", 6, 0)
+	windowBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		if RunStatsDB.full == 1 then RunStatsDB.full = nil else RunStatsDB.full = 1 end
+		page = 1
+		Refresh()
+	end)
+
+	local paceBtn = MakeButton(frame, 84, 20)
+	paceBtn:SetPoint("LEFT", windowBtn, "RIGHT", 6, 0)
+	paceBtn.label:SetText("Average")
+	frame.paceBtn = paceBtn
+	paceBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		if RunStatsDB.lastMin == 1 then RunStatsDB.lastMin = nil else RunStatsDB.lastMin = 1 end
+		page = 1
+		Refresh()
+		PaintHeaders()
+	end)
+
+	liveBtn = MakeButton(frame, 78, 20)
+	liveBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -46)
+	liveBtn.label:SetText("This run")
+	liveBtn:SetScript("OnClick", function() InspectCurrent() end)
+end
+
+local function BuildRows()
+	headers = {}
+	local c
+	for c = 1, table.getn(COLS) do
+		local col = COLS[c]
+		local b = CreateFrame("Button", nil, frame)
+		b:SetWidth(col.w)
+		b:SetHeight(16)
+		b:SetPoint("TOPLEFT", frame, "TOPLEFT", col.x, -70)
+		local fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		fs:SetPoint("LEFT", b, "LEFT", 0, 0)
+		fs:SetText(col.text)
+		b.label = fs
+		b.key = col.key
+		b:SetScript("OnClick", function()
+			HeaderClick(this.key)
+			PaintHeaders()
+		end)
+		headers[c] = b
+	end
+
+	rows = {}
+	local r
+	for r = 1, PAGE do
+		local holder = CreateFrame("Frame", nil, frame)
+		holder:SetWidth(FRAME_W - 16)
+		holder:SetHeight(ROW_H)
+		holder:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -88 - (r - 1) * ROW_H)
+		local bg = holder:CreateTexture(nil, "BACKGROUND")
+		bg:SetAllPoints(holder)
+		if math.mod(r, 2) == 0 then
+			bg:SetTexture(0.16, 0.13, 0.07, 0.65)
+		else
+			bg:SetTexture(0.06, 0.05, 0.03, 0.4)
+		end
+		holder:EnableMouse(true)
+		holder:SetScript("OnEnter", function() ShowTip(this.item) end)
+		holder:SetScript("OnLeave", function() HideTip() end)
+		local cells = {}
+		for c = 1, table.getn(COLS) do
+			local col = COLS[c]
+			local fs = holder:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+			fs:SetPoint("LEFT", holder, "LEFT", col.x - 6, 0)
+			fs:SetWidth(col.w)
+			fs:SetJustifyH("LEFT")
+			fs:SetTextColor(0.96, 0.93, 0.84)
+			cells[c] = fs
+		end
+		local del = MakeButton(holder, 22, 18)
+		del:SetPoint("RIGHT", holder, "RIGHT", -66, 0)
+		del.label:SetText("X")
+		del:SetScript("OnClick", function() AskDelete(this.rec) end)
+		del:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(0.85, 0.25, 0.2, 1)
+		end)
+		local btn = MakeButton(holder, 62, 18)
+		btn:SetPoint("RIGHT", holder, "RIGHT", -2, 0)
+		btn.label:SetText("Details")
+		btn:SetScript("OnClick", function()
+			pop.graphLast = nil
+			OpenBuild(this)
+		end)
+		btn:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+		end)
+		rows[r] = { holder = holder, cells = cells, btn = btn, del = del }
+	end
+end
+
 local function BuildList()
 	frame = CreateFrame("Frame", "RunStatsFrame", UIParent)
-	frame:SetWidth(760)
+	frame:SetWidth(FRAME_W)
 	frame:SetHeight(430)
 	frame:SetFrameStrata("DIALOG")
 	frame:SetMovable(true)
@@ -3048,113 +3260,8 @@ local function BuildList()
 	sub:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -28)
 	sub:SetTextColor(0.9, 0.85, 0.7)
 
-	classBtn = MakeButton(frame, 120, 20)
-	classBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -46)
-	classBtn:SetScript("OnClick", function()
-		if RunStatsDB.allClasses == 1 then RunStatsDB.allClasses = nil else RunStatsDB.allClasses = 1 end
-		page = 1
-		anchorCache = nil
-		Refresh()
-	end)
-
-	mapBtn = MakeButton(frame, 90, 20)
-	mapBtn:SetPoint("LEFT", classBtn, "RIGHT", 6, 0)
-	mapBtn:SetScript("OnClick", function()
-		if RunStatsDB.allMaps == 1 then RunStatsDB.allMaps = nil else RunStatsDB.allMaps = 1 end
-		page = 1
-		Refresh()
-	end)
-
-	windowBtn = MakeButton(frame, 110, 20)
-	windowBtn:SetPoint("LEFT", mapBtn, "RIGHT", 6, 0)
-	windowBtn:SetScript("OnClick", function()
-		if RunStatsDB.full == 1 then RunStatsDB.full = nil else RunStatsDB.full = 1 end
-		page = 1
-		Refresh()
-	end)
-
-	local paceBtn = MakeButton(frame, 90, 20)
-	paceBtn:SetPoint("LEFT", windowBtn, "RIGHT", 6, 0)
-	paceBtn.label:SetText("Average")
-	frame.paceBtn = paceBtn
-	paceBtn:SetScript("OnClick", function()
-		if RunStatsDB.lastMin == 1 then RunStatsDB.lastMin = nil else RunStatsDB.lastMin = 1 end
-		page = 1
-		Refresh()
-		PaintHeaders()
-	end)
-
-	liveBtn = MakeButton(frame, 78, 20)
-	liveBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -46)
-	liveBtn.label:SetText("This run")
-	liveBtn:SetScript("OnClick", function() InspectCurrent() end)
-
-	headers = {}
-	local c
-	for c = 1, table.getn(COLS) do
-		local col = COLS[c]
-		local b = CreateFrame("Button", nil, frame)
-		b:SetWidth(col.w)
-		b:SetHeight(16)
-		b:SetPoint("TOPLEFT", frame, "TOPLEFT", col.x, -70)
-		local fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		fs:SetPoint("LEFT", b, "LEFT", 0, 0)
-		fs:SetText(col.text)
-		b.label = fs
-		b.key = col.key
-		b:SetScript("OnClick", function()
-			HeaderClick(this.key)
-			PaintHeaders()
-		end)
-		headers[c] = b
-	end
-
-	rows = {}
-	local r
-	for r = 1, PAGE do
-		local holder = CreateFrame("Frame", nil, frame)
-		holder:SetWidth(744)
-		holder:SetHeight(ROW_H)
-		holder:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -88 - (r - 1) * ROW_H)
-		local bg = holder:CreateTexture(nil, "BACKGROUND")
-		bg:SetAllPoints(holder)
-		if math.mod(r, 2) == 0 then
-			bg:SetTexture(0.16, 0.13, 0.07, 0.65)
-		else
-			bg:SetTexture(0.06, 0.05, 0.03, 0.4)
-		end
-		holder:EnableMouse(true)
-		holder:SetScript("OnEnter", function() ShowTip(this.item) end)
-		holder:SetScript("OnLeave", function() HideTip() end)
-		local cells = {}
-		for c = 1, table.getn(COLS) do
-			local col = COLS[c]
-			local fs = holder:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-			fs:SetPoint("LEFT", holder, "LEFT", col.x - 6, 0)
-			fs:SetWidth(col.w)
-			fs:SetJustifyH("LEFT")
-			fs:SetTextColor(0.96, 0.93, 0.84)
-			cells[c] = fs
-		end
-		local del = MakeButton(holder, 22, 18)
-		del:SetPoint("RIGHT", holder, "RIGHT", -66, 0)
-		del.label:SetText("X")
-		del:SetScript("OnClick", function() AskDelete(this.rec) end)
-		del:SetScript("OnEnter", function()
-			this:SetBackdropBorderColor(0.85, 0.25, 0.2, 1)
-		end)
-		local btn = MakeButton(holder, 62, 18)
-		btn:SetPoint("RIGHT", holder, "RIGHT", -2, 0)
-		btn.label:SetText("Details")
-		btn:SetScript("OnClick", function()
-			pop.graphLast = nil
-			OpenBuild(this)
-		end)
-		btn:SetScript("OnEnter", function()
-			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
-		end)
-		rows[r] = { holder = holder, cells = cells, btn = btn, del = del }
-	end
+	BuildFilters()
+	BuildRows()
 
 	prevBtn = MakeButton(frame, 28, 18)
 	prevBtn:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 10, 8)
@@ -3539,6 +3646,9 @@ local function Tick()
 	if visible then Refresh() end
 end
 
+local PerfCommand
+
+do
 local PERF_NAMES = { "tick", "refresh", "details", "meter", "build", "hits" }
 local perf = nil
 local perfStack = {}
@@ -3664,7 +3774,7 @@ local function PerfReport()
 	end
 end
 
-local function PerfCommand(rest)
+PerfCommand = function(rest)
 	if rest == "show" then
 		if perf then PerfReport() else Say("perf is not running. /stats perf starts it.") end
 		return
@@ -3676,6 +3786,7 @@ local function PerfCommand(rest)
 	else
 		PerfStart()
 	end
+end
 end
 
 local elapsed = 0
