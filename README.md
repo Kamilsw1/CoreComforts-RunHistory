@@ -4,39 +4,41 @@ Core Comforts and Run Stats are addons for [Azeroth Survivors](https://azerothsu
 
 ## Core Comforts
 
-Full target health, a kill, gold, and cache line, guardian timers, minimap pins and arrows, and spell cooldown decimals. The armory lists gear and set bonuses. `/cc` opens options. `/cc reset` parks the movable list.
+Boss and guardian health bars, with debuffs and an experimental highlight for estimated damage over time. Guardian timers, and minimap pins for guardians and caches. Every option can be turned on or off. `/cc` opens the window.
 
-Direction arrows for a cache and a guardian, the jewelry bar, and the kill, gold, and cache line.
+The armory lists your gear. For now it only tracks whether you have a piece or not. The addon cannot read your collection, so you can edit the collection and mark the items yourself. If a boss drops a piece during a run, the armory checks it off.
 
-![Cache and guardian arrows, jewelry, and the tally line](screenshots/hud.png)
+Direction arrows for a cache and a guardian. Kill count, gold, and caches. The cache number turns green when you can afford one and red when you cannot. The number in parentheses is how many caches you can afford right now. Equipped jewelry is shown above the bar.
 
-Boss timer, boss health bars, and the debuffs on them.
+![Direction arrows, tally line, and equipped jewelry](screenshots/hud.png)
 
-![Boss timer and debuffs on boss bars](screenshots/boss-bars.png)
+Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an estimate of the damage over time.
 
-Upcoming bosses, with the gear they drop. A check mark means that piece is already in the armory collection.
+![Boss timer and boss health bars](screenshots/boss-bars.png)
 
-![Boss list with drop icons](screenshots/boss-list.png)
+Upcoming bosses, and the gear they drop. A mark shows whether you already own that piece, based on the armory collection in the addon.
 
-Kill, experience, and gold per minute, alive enemies, and guardian timers.
+![Boss list with owned drops marked](screenshots/boss-list.png)
 
-![Per-minute rates, alive enemies, and guardian timers](screenshots/rates.png)
+Kills, experience, and gold per minute, and how many enemies are alive. Guardian timers.
+
+![Per-minute rates and guardian timers](screenshots/rates.png)
 
 Luck, and the chance of rare, epic, and legendary spells and amulets.
 
 ![Luck and card chances](screenshots/luck.png)
 
-The options window. Each piece can be turned off.
+The options window. Each option can be turned on or off.
 
 ![Core Comforts options](screenshots/options.jpg)
 
-Experimental options, including cooldown decimals.
+Experimental options for damage-over-time estimates, caches you can buy, luck, decimal places, and guardian and boss nameplates. Decimal places are not very useful, because the game appears to round to one decimal place. Nameplates are only offered here.
 
 ![Experimental options](screenshots/experimental.png)
 
-The armory. Gear is listed by rarity and slot, and each set bonus has its own tooltip. Checked pieces are ones you own.
+The armory. Gear from each map and boss. It updates when you get a drop. The addon cannot read your current collection, but you can edit the collection and check the items you already owned before installing it. Right now it only records whether you own a specific item. Star ranks, 1 through 5, are not supported yet. I might look into that later.
 
-![Armory gear grid and a set bonus tooltip](screenshots/armory.jpg)
+![Armory, with owned pieces checked](screenshots/armory.jpg)
 
 ## Run Stats
 
