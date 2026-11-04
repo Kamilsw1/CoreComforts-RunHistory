@@ -20,9 +20,13 @@ Upcoming bosses, and the gear they drop. A mark shows whether you already own th
 
 ![Boss list with owned drops marked](screenshots/boss-list.png)
 
-Kills, experience, and gold per minute, and how many enemies are alive. Guardian timers.
+Kills, experience, and gold per minute, and how many enemies are alive.
 
-![Per-minute rates and guardian timers](screenshots/rates.png)
+![Kills, experience, and gold per minute](screenshots/rates.png)
+
+Guardian timers. Each row shows whether that guardian is alive, in combat, or how long until it returns.
+
+![Guardian timers](screenshots/guardians.png)
 
 Luck, and the chance of rare, epic, and legendary spells and amulets.
 
