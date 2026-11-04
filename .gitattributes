@@ -1,2 +1,4 @@
 *.toc text eol=crlf
 *.tga binary
+*.png binary
+*.jpg binary
