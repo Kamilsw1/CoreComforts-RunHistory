@@ -71,7 +71,7 @@ local function Say(msg)
 end
 
 local function On(key)
-	if key == "dotestimate" or key == "nameplates" or key == "cachecount" or key == "luckodds" then
+	if key == "dotestimate" or key == "nameplates" or key == "luckodds" then
 		local picked = CoreComfortsDB[key]
 		return picked == true or picked == 1
 	end
@@ -3587,6 +3587,7 @@ local optionKeys = {
 	{ key = "cachearrow", label = "Cache arrow" },
 	{ header = "UI", col = 2, tab = 1 },
 	{ key = "counter", label = "Kills, gold, and cache" },
+	{ key = "cachecount", label = "Caches you can buy", tip = "Adds (3) after the cache price.|That number is how many caches your gold can pay for right now.|Each one costs more than the last, so 100 gold at 20 buys 3.|While this is off, the bar shows the price only." },
 	{ key = "jewelry", label = "Jewelry bar" },
 	{ header = "Statistics", col = 2 },
 	{ key = "stats", label = "Kill, XP, and gold per minute", tip = "The first number is the last 60 seconds.|Average is the pace for the whole run.|Pauses, level-up picks, and cache picks are left out." },
@@ -3600,7 +3601,6 @@ local optionKeys = {
 	{ header = "Experimental", col = 1, tab = 2 },
 	{ key = "dotestimate", label = "DoT damage on boss bars", tip = "The orange length is the damage your damage-over-time effects should still deal before they run out.|It comes from each DoT's periodic hits on that boss over the last 6 seconds, crits and haste included.|Talent hits a tick sets off, like Shadowy Weaving, are added to that DoT.|The estimate drops when a tick lands, so the red part holds still between ticks.|A DoT first used this run shows after its first ticks. Later enemies start from what it learned." },
 	{ key = "nameplates", label = "Guardian and boss nameplates", tip = "Shows nameplates for guardians and bosses only.|Turn on enemy nameplates in the game options, or no plates are shown.|Other enemies are hidden while this is on.|A normal enemy with the same name as one of them still shows." },
-	{ key = "cachecount", label = "Caches you can buy", tip = "Adds (3) after the cache price.|That number is how many caches your gold can pay for right now.|Each one costs more than the last, so 100 gold at 20 buys 3.|While this is off, the bar shows the price only." },
 	{ key = "luckodds", label = "Luck and card chances", tip = "Shows your luck and the estimated chance of a Rare, Epic, or Legendary card.|It stays up before a run too, at 0% until the run begins.|Spells, rings, and trinkets share one column. Amulets are higher.|One percent is added for each level, up to 30%.|Drag the panel to move it." },
 	{ header = "Cooldown decimals", col = 1 },
 	{ slider = "decimals", label = "Decimal places", min = 0, max = 4, default = 0, tip = "Shows a spell's cooldown with more decimal places.|The number is the cooldown the game already reports." }
