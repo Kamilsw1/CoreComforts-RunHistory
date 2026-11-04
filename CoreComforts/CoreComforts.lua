@@ -417,6 +417,22 @@ local function CachesAffordable(gold, cost)
 	return n
 end
 
+local function CanAffordCache()
+	local gold, cost = 0, 0
+	local run = AZS_RUN
+	if type(run) == "table" then
+		gold = Num(run.gold) or 0
+		cost = Num(run.chest) or 0
+	end
+	return CachesAffordable(gold, cost) >= 1
+end
+
+local function ShowCacheArrow()
+	if not On("cachearrow") then return false end
+	if not On("cacheafford") then return true end
+	return CanAffordCache()
+end
+
 local function UpdateCounter()
 	if not On("counter") or not (InRun() or Staging()) then
 		if not On("counter") then ShowStockTally() end
@@ -947,7 +963,8 @@ local DROP_COLOR = {
 	rare = { 0, 0.44, 0.87 },
 	epic = { 0.64, 0.21, 0.93 },
 	legendary = { 1, 0.5, 0 },
-	pvp = { 0.45, 0.82, 0.28 }
+	pvp = { 0.45, 0.82, 0.28 },
+	tier05 = { 0.8, 0.58, 0.94 }
 }
 local bossDropCache = {}
 
@@ -2026,7 +2043,7 @@ local function UpdateMap()
 			elseif guides.guardian then
 				guides.guardian:Hide()
 			end
-			if On("cachearrow") and guides.cache then
+			if ShowCacheArrow() and guides.cache then
 				PointGuide(guides.cache, { east = 0, north = 1, yards = 0 })
 			elseif guides.cache then
 				guides.cache:Hide()
@@ -2115,7 +2132,7 @@ local function UpdateMap()
 		if On("guardarrow") then PointGuide(guides.guardian, nearestGuard) else guides.guardian:Hide() end
 	end
 	if guides.cache then
-		if On("cachearrow") then PointGuide(guides.cache, nearestCache) else guides.cache:Hide() end
+		if ShowCacheArrow() then PointGuide(guides.cache, nearestCache) else guides.cache:Hide() end
 	end
 end
 
@@ -3683,6 +3700,7 @@ local optionKeys = {
 	{ header = "Direction arrows", col = 1 },
 	{ key = "guardarrow", label = "Boss arrow", tip = "Points at the closest boss that is still waiting.|A boss already in combat is left off, since it leaves its spawn." },
 	{ key = "cachearrow", label = "Cache arrow" },
+	{ key = "cacheafford", parent = "cachearrow", label = "Only when you can afford one", tip = "Hides the cache arrow until your gold can pay for a cache.|That is the same number as Caches you can buy.|Turn this off to point at a cache even when you cannot buy it yet." },
 	{ header = "UI", col = 2, tab = 1 },
 	{ key = "counter", label = "Kills, gold, and cache" },
 	{ key = "cachecount", label = "Caches you can buy", tip = "Adds (3) after the cache price.|That number is how many caches your gold can pay for right now.|Each one costs more than the last, so 100 gold at 20 buys 3.|While this is off, the bar shows the price only." },
@@ -3750,6 +3768,22 @@ local function SliderCaption(key, value)
 	return value .. " places"
 end
 
+local function SyncChildOptions()
+	local n
+	for n = 1, table.getn(optionBoxes) do
+		local box = optionBoxes[n]
+		if box.parentKey then
+			if On(box.parentKey) then
+				box:Enable()
+				if box.caption then box.caption:SetTextColor(1, 1, 1) end
+			else
+				box:Disable()
+				if box.caption then box.caption:SetTextColor(0.45, 0.45, 0.45) end
+			end
+		end
+	end
+end
+
 local function RefreshOptions()
 	local n
 	for n = 1, table.getn(optionBoxes) do
@@ -3767,6 +3801,7 @@ local function RefreshOptions()
 		edit:SetText(string.format("%.0f", SliderValue(edit.optKey, edit.optMin, edit.optMax, edit.optDefault)))
 	end
 	PaintChoices()
+	SyncChildOptions()
 end
 
 local oi
@@ -3845,7 +3880,7 @@ local function ShowOptionTab(tab)
 	end
 	if tab == 3 then
 		options:SetWidth(700)
-		options:SetHeight(536)
+		options:SetHeight(590)
 		if RefreshArmory then RefreshArmory() end
 	else
 		options:SetWidth(580)
@@ -4141,15 +4176,21 @@ for oi = 1, table.getn(optionKeys) do
 		local box = CreateFrame("CheckButton", "CoreComfortsOpt" .. entry.key, options)
 		box:SetWidth(26)
 		box:SetHeight(26)
-		box:SetPoint("TOPLEFT", options, "TOPLEFT", x + 6, y)
+		local indent = 0
+		if entry.parent then indent = 18 end
+		box:SetPoint("TOPLEFT", options, "TOPLEFT", x + 6 + indent, y)
 		box:SetNormalTexture("Interface\\Buttons\\UI-CheckBox-Up")
 		box:SetPushedTexture("Interface\\Buttons\\UI-CheckBox-Down")
 		box:SetHighlightTexture("Interface\\Buttons\\UI-CheckBox-Highlight", "ADD")
 		box:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
 		box.key = entry.key
-		local caption = options:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		box.parentKey = entry.parent
+		local captionFont = "GameFontHighlight"
+		if entry.parent then captionFont = "GameFontHighlightSmall" end
+		local caption = options:CreateFontString(nil, "OVERLAY", captionFont)
 		caption:SetPoint("LEFT", box, "RIGHT", 6, 0)
 		caption:SetText(entry.label)
+		box.caption = caption
 		box:SetScript("OnClick", function()
 			local key = this.key
 			if key == "locked" then
@@ -4179,6 +4220,7 @@ for oi = 1, table.getn(optionKeys) do
 			UpdateNameplates()
 			local luckFrame = getglobal("CoreComfortsLuck")
 			if luckFrame and luckFrame.Update then luckFrame.Update() end
+			SyncChildOptions()
 		end)
 		if entry.tip then
 			local hit = CreateFrame("Button", nil, options)
@@ -4203,6 +4245,7 @@ local function BuildArmoryPanel()
 		rare = { 0, 0.44, 0.87 },
 		epic = { 0.64, 0.21, 0.93 },
 		pvp = { 0.45, 0.82, 0.28 },
+		tier05 = { 0.8, 0.58, 0.94 },
 		legendary = { 1, 0.5, 0 }
 	}
 	local RARITY_NAME = {
@@ -4211,6 +4254,7 @@ local function BuildArmoryPanel()
 		rare = "Rare",
 		epic = "Epic",
 		pvp = "PvP",
+		tier05 = "T0.5",
 		legendary = "Legendary"
 	}
 	local RARITIES = {
@@ -4219,6 +4263,7 @@ local function BuildArmoryPanel()
 		{ key = "rare", zones = "Arathi Basin\nFeralas" },
 		{ key = "epic", zones = "Gurubashi Arena\nScarlet Monastery" },
 		{ key = "pvp", zones = "Alterac Valley\nBlackrock Mountain" },
+		{ key = "tier05", zones = "Scholomance" },
 		{ key = "legendary", zones = "Gates of Ahn'Qiraj\nNaxxramas" }
 	}
 	local SLOTS = {
@@ -4269,7 +4314,7 @@ local function BuildArmoryPanel()
 
 	local sourceNote = armoryRoot:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	sourceNote:SetPoint("CENTER", armoryRoot, "BOTTOM", 0, 10)
-	sourceNote:SetText("Data pulled from https://azerothsurvivors.app/items on 01/11/2026")
+	sourceNote:SetText("Data pulled from https://azerothsurvivors.app/items on 04/11/2026")
 	sourceNote:SetTextColor(0.55, 0.48, 0.32)
 
 	local function AddPieces(text, sep, r, g, b)
@@ -4598,12 +4643,16 @@ local function BuildArmoryPanel()
 			else
 				GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
 			end
-			GameTooltip:SetText(bonus.skill, tint[1], tint[2], tint[3])
 			local rarityName = RARITY_NAME[bonus.rarity]
 			if not rarityName then rarityName = bonus.rarity end
-			GameTooltip:AddLine(rarityName .. " set", 1, 0.82, 0)
+			GameTooltip:SetText(rarityName .. " set", tint[1], tint[2], tint[3])
 			GameTooltip:AddLine("4 pieces at 1 star", 0.85, 0.7, 0.3)
-			AddStats(bonus.four)
+			if bonus.rarity == "tier05" then
+				-- T0.5 four-piece effects are sentences, not a list of stats.
+				AddWrapped(bonus.four, 0, 1, 0)
+			else
+				AddStats(bonus.four)
+			end
 			GameTooltip:AddLine("8 pieces at 3 stars", 0.85, 0.7, 0.3)
 			AddWrapped(bonus.eight, 0, 1, 0)
 			GameTooltip:AddLine("8 pieces at 5 stars", 0.85, 0.7, 0.3)
@@ -4635,12 +4684,28 @@ local function BuildArmoryPanel()
 		return key, label
 	end
 
+	local function PaintIconOwned(button, owned)
+		if not button.icon then return end
+		if owned then
+			if button.icon.SetDesaturated then button.icon:SetDesaturated(nil) end
+			button.icon:SetVertexColor(1, 1, 1)
+		else
+			if button.icon.SetDesaturated then button.icon:SetDesaturated(1) end
+			button.icon:SetVertexColor(0.45, 0.45, 0.45)
+		end
+	end
+
 	local function PaintOwned(button, owned)
-		if not button.mark then return end
 		if not button.item then
-			button.mark:Hide()
+			if button.mark then button.mark:Hide() end
+			if button.icon then
+				if button.icon.SetDesaturated then button.icon:SetDesaturated(nil) end
+				button.icon:SetVertexColor(1, 1, 1)
+			end
 			return
 		end
+		PaintIconOwned(button, owned)
+		if not button.mark then return end
 		if collect.editing or owned then
 			button.mark:Show()
 			if owned then button.tick:Show() else button.tick:Hide() end
@@ -4763,6 +4828,8 @@ local function BuildArmoryPanel()
 				local button = cells[RARITIES[row].key .. "|" .. SLOTS[col].key]
 				button.item = nil
 				button.icon:Hide()
+				if button.icon.SetDesaturated then button.icon:SetDesaturated(nil) end
+				button.icon:SetVertexColor(1, 1, 1)
 				if button.mark then button.mark:Hide() end
 				PaintCell(button, false)
 				button:Show()
@@ -4771,7 +4838,10 @@ local function BuildArmoryPanel()
 		local i
 		for i = 1, n do
 			local item = gear[i]
-			local button = cells[item.rarity .. "|" .. item.slot]
+			local slotKey = item.slot
+			-- A hunter's bow or rifle sits in the weapon column.
+			if slotKey == "Ranged" then slotKey = "Main Hand" end
+			local button = cells[item.rarity .. "|" .. slotKey]
 			if button and item.icon and item.icon ~= "" then
 				button.item = item
 				button.icon:SetTexture(item.icon)
@@ -4789,6 +4859,10 @@ local function BuildArmoryPanel()
 			end
 		end
 		local showOff = (key == "rogue" or key == "shaman")
+		local weaponHeader = headers["Main Hand"]
+		if weaponHeader then
+			if key == "hunter" then weaponHeader:SetText("RANGED") else weaponHeader:SetText("MAIN\nHAND") end
+		end
 		local offHeader = headers["Off Hand"]
 		if offHeader then
 			if showOff then offHeader:Show() else offHeader:Hide() end
@@ -4802,6 +4876,8 @@ local function BuildArmoryPanel()
 				else
 					offButton.item = nil
 					offButton.icon:Hide()
+					if offButton.icon.SetDesaturated then offButton.icon:SetDesaturated(nil) end
+					offButton.icon:SetVertexColor(1, 1, 1)
 					if offButton.mark then offButton.mark:Hide() end
 					offButton:Hide()
 				end
@@ -4925,11 +5001,10 @@ local function BuildArmoryPanel()
 		local id = tostring(button.item.id)
 		if collect.draft[id] ~= nil then
 			collect.draft[id] = nil
-			if button.tick then button.tick:Hide() end
+			PaintOwned(button, false)
 		else
 			collect.draft[id] = 0
-			if button.mark then button.mark:Show() end
-			if button.tick then button.tick:Show() end
+			PaintOwned(button, true)
 		end
 	end
 

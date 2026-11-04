@@ -1,11 +1,27 @@
--- Run Stats: one saved sheet at 20:00 and one at the end of each run.
--- The list defaults to this class, this map, this Heroic level, and the
--- leading talent tree. Kills per minute is the sort. /stats toggles the window.
+-- Run Stats: one saved sheet when the final boss dies (Full run) and one at
+-- the real end including endless (Endless). The list defaults to this class,
+-- this map, and this difficulty. Kills per minute is the sort. /stats toggles
+-- the window.
 
-local PAGE = 12
-local ROW_H = 24
-local MIN_TIME = 600
-local MARK = 1200
+-- One table so the file stays under Lua 5.0's 200 locals.
+local CFG = {
+	PAGE = 12,
+	ROW_H = 24,
+	MIN_TIME = 600,
+	MARK = 1200,
+	ROMAN = { "I", "II", "III", "IV", "V" },
+	CLASS_COLOR = {
+		warrior = { 0.78, 0.61, 0.43 },
+		paladin = { 0.96, 0.55, 0.73 },
+		hunter = { 0.67, 0.83, 0.45 },
+		rogue = { 1.00, 0.96, 0.41 },
+		priest = { 1.00, 1.00, 1.00 },
+		shaman = { 0.00, 0.44, 0.87 },
+		mage = { 0.41, 0.80, 0.94 },
+		warlock = { 0.58, 0.51, 0.79 },
+		druid = { 1.00, 0.49, 0.04 },
+	},
+}
 
 local TREE_ORDER = {
 	priest = { "discipline", "holy", "shadow" },
@@ -47,7 +63,6 @@ local COLS = {
 }
 
 local FRAME_W = 880
-local ROMAN = { "I", "II", "III", "IV", "V" }
 
 local STAT_KEYS = {
 	"crit", "cm", "dmg", "haste", "doth",
@@ -63,7 +78,7 @@ local shown = {}
 local anchorCache = nil
 local anchorAt = 0
 
-local frame, sub, filters, headers, rows, foot, prevBtn, nextBtn, pageText
+local frame, sub, headers, rows, foot, prevBtn, nextBtn, pageText
 local mapBtn, diffBtn, windowBtn, classBtn, diffMenu
 local pop, popTitle, popScroll, popChild, popSlider, statBtn
 local PlaceDetails
@@ -237,7 +252,7 @@ local function DiffName(h)
 	if h < 0 then return "Any difficulty" end
 	if h == 0 then return "Normal" end
 	if h > 5 then h = 5 end
-	return "Heroic " .. (ROMAN[h] or tostring(h))
+	return "Heroic " .. (CFG.ROMAN[h] or tostring(h))
 end
 
 local function DiffLevel(h)
@@ -245,6 +260,18 @@ local function DiffLevel(h)
 	if h < 0 then h = 0 end
 	if h > 5 then h = 5 end
 	return h
+end
+
+-- Seconds until the zone's final boss (Elwynn 960, Naxx 1200, …).
+local function ZoneLength(rec)
+	if rec and Num(rec.len) > 0 then return Num(rec.len) end
+	if AZS_GetRunLength then
+		local n = Num(AZS_GetRunLength())
+		if n > 0 then return n end
+	end
+	if type(AZS_ZONE) == "table" and Num(AZS_ZONE.len) > 0 then return Num(AZS_ZONE.len) end
+	if type(AZS_RUN) == "table" and Num(AZS_RUN.fin) > 0 then return Num(AZS_RUN.fin) end
+	return CFG.MARK
 end
 
 local function Phase()
@@ -352,40 +379,6 @@ local function CopyList(src, field)
 		end
 	end
 	return out
-end
-
-local function BuildPoints(class, talents)
-	local order = {}
-	local known = {}
-	local src = TREE_ORDER[class]
-	local i
-	if src then
-		for i = 1, table.getn(src) do
-			order[i] = src[i]
-			known[src[i]] = 1
-		end
-	end
-	local totals = {}
-	for i = 1, table.getn(order) do
-		totals[order[i]] = 0
-	end
-	for i = 1, table.getn(talents) do
-		local key = talents[i].tree
-		local rank = Num(talents[i].rank)
-		if key ~= "" and rank > 0 then
-			totals[key] = (totals[key] or 0) + rank
-			if not known[key] then
-				known[key] = 1
-				tinsert(order, key)
-			end
-		end
-	end
-	local points = {}
-	for i = 1, table.getn(order) do
-		local key = order[i]
-		tinsert(points, { key = key, name = NiceTree(key), points = totals[key] or 0, order = i })
-	end
-	return points
 end
 
 local function SpecOf(points)
@@ -930,6 +923,14 @@ local function FillIdentity(rec)
 	if type(AZS_ZONE.rname) == "string" and AZS_ZONE.rname ~= "" then rec.rname = AZS_ZONE.rname end
 	if type(AZS_ZONE.affixes) == "string" then rec.affixes = AZS_ZONE.affixes end
 	if AZS_ZONE.heroic ~= nil then rec.heroic = math.floor(Num(AZS_ZONE.heroic)) end
+	if Num(AZS_ZONE.len) > 0 then rec.len = Num(AZS_ZONE.len) end
+	end
+	if (not rec.len or Num(rec.len) <= 0) and AZS_GetRunLength then
+		local n = Num(AZS_GetRunLength())
+		if n > 0 then rec.len = n end
+	end
+	if (not rec.len or Num(rec.len) <= 0) and type(AZS_RUN) == "table" and Num(AZS_RUN.fin) > 0 then
+		rec.len = Num(AZS_RUN.fin)
 	end
 	if (not rec.class or rec.class == "") and UnitClass then
 		local name = UnitClass("player")
@@ -995,6 +996,7 @@ local function StartRun(id)
 		party = 0,
 		heroic = 0,
 		affixes = "",
+		len = 0,
 	}
 	tinsert(RunStatsDB.runs, rec)
 	FillIdentity(rec)
@@ -1420,7 +1422,7 @@ local function ArchiveRestart(rec)
 	local kept = {
 		id = (rec.id or "run") .. "#" .. tostring(table.getn(RunStatsDB.runs) + 1),
 		class = rec.class, cname = rec.cname, zone = rec.zone, zname = rec.zname,
-		heroic = rec.heroic, affixes = rec.affixes, hero = rec.hero,
+		heroic = rec.heroic, affixes = rec.affixes, hero = rec.hero, len = rec.len,
 		race = rec.race, rname = rec.rname, party = rec.party,
 		result = rec.result, tEnd = rec.tEnd, at20 = rec.at20, atEnd = rec.atEnd, atWin = rec.atWin,
 		preview = rec.preview, watched = rec.watched, told = 1,
@@ -1767,6 +1769,7 @@ local function Finish(rec)
 			rec.tEnd = Num(rec.atEnd.t)
 			if type(summary.result) == "string" then rec.result = summary.result end
 			if type(rec.atWin) == "table" then rec.result = "victory" end
+			if rec.result == "victory" and not rec.at20 then rec.at20 = rec.atEnd end
 			rec.preview = rec.atEnd
 			changed = true
 		end
@@ -1810,6 +1813,10 @@ local function Finish(rec)
 	end
 	if type(rec.atWin) == "table" then rec.result = "victory" end
 	rec.preview = rec.atEnd
+	-- Full run ends when the final boss dies, not when it spawns.
+	if rec.result == "victory" and type(rec.atEnd) == "table" and not rec.at20 then
+		rec.at20 = rec.atEnd
+	end
 	Announce(rec)
 	return true
 end
@@ -1819,7 +1826,7 @@ local function Duration(rec)
 	if type(rec.atEnd) == "table" and Num(rec.atEnd.t) > 0 then return Num(rec.atEnd.t) end
 	if rec.liveT and Num(rec.liveT) > 0 then return Num(rec.liveT) end
 	if type(rec.pending) == "table" and Num(rec.pending.t) > 0 then return Num(rec.pending.t) end
-	if type(rec.at20) == "table" then return MARK end
+	if type(rec.at20) == "table" then return Num(rec.at20.t) > 0 and Num(rec.at20.t) or ZoneLength(rec) end
 	return 0
 end
 
@@ -1834,20 +1841,16 @@ local function SheetFor(rec, full)
 		return nil
 	end
 	if type(rec.at20) == "table" then return rec.at20 end
-	if type(rec.atEnd) == "table" and Num(rec.atEnd.t) <= MARK then return rec.atEnd end
-	if rec.open ~= 1 and type(rec.pending) == "table" and Num(rec.pending.t) > 0 and Num(rec.pending.t) <= MARK then
-		return rec.pending
-	end
+	if type(rec.atWin) == "table" then return rec.atWin end
+	-- No victory sheet: the attempt itself (died or left before the final boss).
+	if type(rec.atEnd) == "table" then return rec.atEnd end
+	if rec.open ~= 1 and type(rec.pending) == "table" then return rec.pending end
 end
 
 local function ClassName(key, fallback)
 	if type(fallback) == "string" and fallback ~= "" then return fallback end
 	if type(key) ~= "string" or key == "" then return "Unknown" end
 	return string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
-end
-
-local function LeadingOf(sheet)
-	return "No spec", ""
 end
 
 local function Anchor()
@@ -1895,7 +1898,7 @@ local function Anchor()
 			local rec = runs[i]
 			local sheet = rec.atEnd or rec.at20 or rec.pending
 			if rec.class and rec.class ~= "" or type(sheet) == "table" then
-				local specName, leading = LeadingOf(sheet)
+				local specName, leading = SpecOf(type(sheet) == "table" and sheet.points)
 				local class = rec.class or ""
 				ctx = {
 					class = class,
@@ -2005,7 +2008,7 @@ end
 
 local function Consider(list, rec, sheet)
 	local rates = RatesOf(sheet)
-	local specName, leading = LeadingOf(sheet)
+	local specName, leading = SpecOf(type(sheet) == "table" and sheet.points)
 	local split = ""
 	tinsert(list, {
 		rec = rec,
@@ -2033,7 +2036,7 @@ local function Collect()
 	for i = 1, table.getn(runs) do
 		local rec = runs[i]
 		local sheet = SheetFor(rec, full)
-		local longEnough = Duration(rec) >= MIN_TIME or rec.watched == 1
+		local longEnough = Duration(rec) >= CFG.MIN_TIME or rec.watched == 1
 		if rec.party ~= 1 and sheet and longEnough then
 			local classOk = (class == "" or rec.class == class or not rec.class or rec.class == "")
 			local mapOk = RunStatsDB.allMaps == 1 or ctx.zone == "" or not rec.zone or rec.zone == "" or rec.zone == ctx.zone
@@ -2720,8 +2723,8 @@ local function Refresh()
 	local _, names = KnownClasses()
 	local cname = names[class] or ctx.cname or "No class"
 	if RunStatsDB.allClasses == 1 then cname = "All classes" end
-	local windowLabel = "First 20 min"
-	if RunStatsDB.full == 1 then windowLabel = "Full run" end
+	local windowLabel = "Full run"
+	if RunStatsDB.full == 1 then windowLabel = "Endless" end
 	local diff = ViewDiff(ctx)
 	sub:SetText(cname .. "  ·  " .. (ctx.zname or "No map") .. "  ·  " .. DiffName(diff))
 	classBtn.label:SetText(Cap(cname, 16))
@@ -2736,13 +2739,13 @@ local function Refresh()
 		end
 	end
 
-	local pages = math.ceil(table.getn(list) / PAGE)
+	local pages = math.ceil(table.getn(list) / CFG.PAGE)
 	if pages < 1 then pages = 1 end
 	if page > pages then page = pages end
 	if page < 1 then page = 1 end
-	local start = (page - 1) * PAGE
+	local start = (page - 1) * CFG.PAGE
 	local r
-	for r = 1, PAGE do
+	for r = 1, CFG.PAGE do
 		local row = rows[r]
 		local item = list[start + r]
 		if item then
@@ -2764,7 +2767,28 @@ local function Refresh()
 				else
 					text = StatText(col.key, rates)
 				end
-				row.cells[c]:SetText(text)
+				local cell = row.cells[c]
+				cell:SetText(text)
+				if col.key == "class" then
+					local cc = nil
+					if item.rec then cc = CFG.CLASS_COLOR[item.rec.class] end
+					if cc then
+						cell:SetTextColor(cc[1], cc[2], cc[3])
+					else
+						cell:SetTextColor(0.96, 0.93, 0.84)
+					end
+				elseif col.key == "t" then
+					local result = item.rec and item.rec.result
+					if result == "victory" then
+						cell:SetTextColor(0.35, 0.92, 0.40)
+					elseif result == "defeat" then
+						cell:SetTextColor(0.95, 0.32, 0.28)
+					else
+						cell:SetTextColor(0.96, 0.93, 0.84)
+					end
+				else
+					cell:SetTextColor(0.96, 0.93, 0.84)
+				end
 			end
 			row.btn.sheet = item.sheet
 			row.btn.race = item.race
@@ -2786,7 +2810,7 @@ local function Refresh()
 		foot:SetText("No runs of 10 minutes or more for this filter. Party runs stay hidden.")
 		pageText:SetText("")
 	else
-		local last = start + PAGE
+		local last = start + CFG.PAGE
 		if last > n then last = n end
 		pageText:SetText((start + 1) .. "-" .. last .. " of " .. n)
 		foot:SetText("K/min, XP/min, G/min and DPS use the run clock. It stops while a card is open or the run is paused. Last min is the final minute. A dash was not saved.")
@@ -2835,29 +2859,6 @@ local function Toggle()
 		end
 		PlaceWindow()
 	end
-end
-
-local function CycleClass()
-	local list = KnownClasses()
-	local n = table.getn(list)
-	if n == 0 then return end
-	local ctx = Anchor()
-	local cur = ViewClass(ctx)
-	local i
-	local at = 0
-	for i = 1, n do
-		if list[i] == cur then at = i end
-	end
-	local nxt = list[at + 1]
-	if not nxt then nxt = list[1] end
-	if nxt == ctx.class then
-		pinnedClass = nil
-	else
-		pinnedClass = nxt
-	end
-	page = 1
-	anchorCache = nil
-	Refresh()
 end
 
 local function HeaderClick(key)
@@ -3149,11 +3150,11 @@ local function BuildRows()
 
 	rows = {}
 	local r
-	for r = 1, PAGE do
+	for r = 1, CFG.PAGE do
 		local holder = CreateFrame("Frame", nil, frame)
 		holder:SetWidth(FRAME_W - 16)
-		holder:SetHeight(ROW_H)
-		holder:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -88 - (r - 1) * ROW_H)
+		holder:SetHeight(CFG.ROW_H)
+		holder:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -88 - (r - 1) * CFG.ROW_H)
 		local bg = holder:CreateTexture(nil, "BACKGROUND")
 		bg:SetAllPoints(holder)
 		if math.mod(r, 2) == 0 then
@@ -3515,20 +3516,6 @@ local function SyncPop(rec)
 	})
 end
 
-local function Snap20(rec, id, t)
-	NoteParty(rec)
-	local snap = FromPending(rec)
-	snap.t = t
-	local ok, sheet = pcall(MakeSheet, rec, id, t)
-	if ok and type(sheet) == "table" then rec.at20 = sheet else rec.at20 = snap end
-	ApplyLastMinute(rec.at20, rec)
-	ApplyLast10(rec.at20, rec)
-	CaptureMeter(rec.at20)
-	CaptureTaken(rec.at20, rec)
-	ApplyLastGraphs(rec.at20, rec)
-	rec.armed20 = nil
-end
-
 local function Tick()
 	if not ready then return end
 	local ph = Phase()
@@ -3587,7 +3574,12 @@ local function Tick()
 			ArchiveRestart(rec)
 			anchorCache = nil
 		else
-			if rec.result == "victory" then rec.atWin = rec.atEnd else rec.told = nil end
+			if rec.result == "victory" then
+				if not rec.at20 then rec.at20 = rec.atEnd end
+				rec.atWin = rec.at20 or rec.atEnd
+			else
+				rec.told = nil
+			end
 			rec.atEnd = nil
 			rec.result = nil
 			rec.tEnd = nil
@@ -3619,7 +3611,8 @@ local function Tick()
 	NoteMeter(rec, t)
 	NoteHits(rec)
 	TrackSpells(rec, t)
-	if t > 0 and t < MARK then rec.armed20 = 1 end
+	local len = ZoneLength(rec)
+	if Num(rec.len) <= 0 and len > 0 then rec.len = len end
 	if t > 0 then rec.seenT = t end
 	if rec.based ~= 1 and t > 0 and t < 30 then
 		if not rec.baseTry or t - Num(rec.baseTry) >= 5 then
@@ -3635,10 +3628,6 @@ local function Tick()
 	end
 	lastOwed = owed
 	lastPh = ph
-	if rec.armed20 == 1 and t >= MARK and not rec.at20 and (ph == "playing" or ph == "choosing" or ph == "paused") then
-		Snap20(rec, id, t)
-		anchorCache = nil
-	end
 	if ph == "dead" or ph == "victory" then
 		Finish(rec)
 		SyncPop(rec)
