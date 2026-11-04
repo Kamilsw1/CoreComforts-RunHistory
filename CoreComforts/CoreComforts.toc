@@ -1,0 +1,9 @@
+## Interface: 11200
+## Title: Core Comforts
+## Notes: Full target health, a kill/gold/cache line, guardian timers, minimap pins and arrows, and spell cooldown decimals.
+## Version: 0.1
+## Author: Kamil
+## SavedVariables: CoreComfortsDB
+ArmoryData.lua
+SetData.lua
+CoreComforts.lua

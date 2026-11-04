@@ -1,0 +1,7 @@
+## Interface: 11200
+## Title: Run Stats
+## Notes: Saves each run and compares kills per minute by class, map, difficulty, and spec. /stats
+## Version: 0.2
+## Author: Kamil
+## SavedVariables: RunStatsDB
+RunStats.lua
