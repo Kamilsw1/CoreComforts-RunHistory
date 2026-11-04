@@ -32,11 +32,11 @@ Luck, and the chance of rare, epic, and legendary spells and amulets.
 
 ![Luck and card chances](screenshots/luck.png)
 
-The options window. Each option can be turned on or off.
+The options window. Each option can be turned on or off. Caches you can buy is under UI, just below kills, gold, and cache, and it starts on.
 
 ![Core Comforts options](screenshots/options.jpg)
 
-Experimental options for damage-over-time estimates, caches you can buy, luck, decimal places, and guardian and boss nameplates. Decimal places are not very useful, because the game appears to round to one decimal place. Nameplates are only offered here.
+Experimental options for damage-over-time estimates, luck, decimal places, and guardian and boss nameplates. Decimal places are not very useful, because the game appears to round to one decimal place. Nameplates are only offered here.
 
 ![Experimental options](screenshots/experimental.png)
 
