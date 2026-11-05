@@ -12,6 +12,10 @@ local CFG = {
 	MIN_MAX = 16,
 	FRAME_W = 880,
 	ROMAN = { "I", "II", "III", "IV", "V" },
+	JEWEL_RANK = {
+		[" I"] = 1, [" II"] = 2, [" III"] = 3, [" IV"] = 4, [" V"] = 5,
+		[" VI"] = 6, [" VII"] = 7, [" VIII"] = 8, [" IX"] = 9, [" X"] = 10,
+	},
 	CLASS_ORDER = { "warrior", "paladin", "hunter", "rogue", "priest", "shaman", "mage", "warlock", "druid" },
 	STAT_KEYS = {
 		"crit", "cm", "dmg", "haste", "doth",
@@ -577,7 +581,7 @@ end
 local function JewelBase(name)
 	if type(name) ~= "string" then return "" end
 	local s = name
-	local suffixes = { " VIII", " VII", " III", " II", " IX", " IV", " VI", " V", " X" }
+	local suffixes = { " VIII", " VII", " III", " II", " IX", " IV", " VI", " V", " X", " I" }
 	local i
 	for i = 1, table.getn(suffixes) do
 		local suf = suffixes[i]
@@ -621,6 +625,71 @@ local function ShareJewelIcons(list, extra)
 			end
 		end
 	end
+end
+
+-- "Quick Strike Ring" and "Quick Strike Ring V" are one item. Keep the highest rank.
+local function LatestJewels(list)
+	local out = {}
+	local at = {}
+	if type(list) ~= "table" then return out end
+	local function Copy(piece)
+		return {
+			category = piece.category or "",
+			name = piece.name or "",
+			key = piece.key or "",
+			rarity = piece.rarity or "",
+			icon = piece.icon or "",
+		}
+	end
+	local function Fill(dst, src)
+		if (type(dst.icon) ~= "string" or dst.icon == "") and type(src.icon) == "string" and src.icon ~= "" then
+			dst.icon = src.icon
+		end
+		if (type(dst.rarity) ~= "string" or dst.rarity == "") and type(src.rarity) == "string" and src.rarity ~= "" then
+			dst.rarity = src.rarity
+		end
+		if (type(dst.category) ~= "string" or dst.category == "") and type(src.category) == "string" and src.category ~= "" then
+			dst.category = src.category
+		end
+		if (type(dst.key) ~= "string" or dst.key == "") and type(src.key) == "string" and src.key ~= "" then
+			dst.key = src.key
+		end
+	end
+	local function Rank(name)
+		local base = JewelBase(name)
+		if base == name then return 0 end
+		local suf = string.sub(name, string.len(base) + 1)
+		return CFG.JEWEL_RANK[suf] or 0
+	end
+	local function Richer(kept, piece)
+		local ra = Rank(kept.name)
+		local rb = Rank(piece.name)
+		if rb ~= ra then return rb > ra end
+		local ar = type(kept.rarity) == "string" and kept.rarity ~= ""
+		local br = type(piece.rarity) == "string" and piece.rarity ~= ""
+		if br ~= ar then return br end
+		return false
+	end
+	local i
+	for i = 1, table.getn(list) do
+		local piece = list[i]
+		if type(piece) == "table" and type(piece.name) == "string" and piece.name ~= "" then
+			local base = JewelBase(piece.name)
+			if base == "" then base = piece.name end
+			local prev = at[base]
+			if not prev then
+				tinsert(out, Copy(piece))
+				at[base] = table.getn(out)
+			elseif Richer(out[prev], piece) then
+				local fresh = Copy(piece)
+				Fill(fresh, out[prev])
+				out[prev] = fresh
+			else
+				Fill(out[prev], piece)
+			end
+		end
+	end
+	return out
 end
 
 local ReadWorn
@@ -733,6 +802,7 @@ local function ReadBuild(id, class)
 		if not have then tinsert(jewelry, piece) end
 	end
 	ShareJewelIcons(jewelry)
+	jewelry = LatestJewels(jewelry)
 	return {
 		points = points or {},
 		armory = armory,
@@ -2263,10 +2333,11 @@ local function ShowTip(row)
 		GameTooltip:AddLine("Spells: " .. spells, 0.75, 0.85, 1, true)
 	end
 	local jewels = ""
-	if type(sheet.jewelry) == "table" then
+	local jewelRows = LatestJewels(sheet.jewelry)
+	if table.getn(jewelRows) > 0 then
 		local i
-		for i = 1, table.getn(sheet.jewelry) do
-			local piece = sheet.jewelry[i]
+		for i = 1, table.getn(jewelRows) do
+			local piece = jewelRows[i]
 			local bit = piece.name or ""
 			if type(piece.category) == "string" and piece.category ~= "" then
 				bit = piece.category .. " " .. bit
@@ -2612,9 +2683,10 @@ local function OpenBuild(btn)
 
 	Head("Jewelry")
 	local jewelN = 0
-	if type(sheet.jewelry) == "table" then
-		for i = 1, table.getn(sheet.jewelry) do
-			local piece = sheet.jewelry[i]
+	local jewelRows = LatestJewels(sheet.jewelry)
+	if table.getn(jewelRows) > 0 then
+		for i = 1, table.getn(jewelRows) do
+			local piece = jewelRows[i]
 			local name = piece.name or ""
 			if name ~= "" then
 				jewelN = jewelN + 1
