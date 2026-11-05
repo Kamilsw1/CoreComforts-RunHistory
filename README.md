@@ -12,35 +12,40 @@ Direction arrows for a cache and a guardian. Kill count, gold, and caches. The c
 
 ![Direction arrows, tally line, and equipped jewelry](screenshots/hud.png)
 
-### Minimap
-
-Minimap icons for guardians and caches. A guardian shows as alive, in combat, or dead. A dead one shows a countdown when it is close to coming back. The icons scale with the minimap zoom.
-
-![Minimap pins for guardians and caches](screenshots/minimap.png)
+<table>
+<tr>
+<td width="50%" align="center" valign="top">
+<h3>Minimap</h3>
+<p>Minimap icons for guardians and caches. A guardian shows as alive, in combat, or dead. A dead one shows a countdown when it is close to coming back. The icons scale with the minimap zoom.</p>
+<img src="screenshots/minimap.png" alt="Minimap pins for guardians and caches" width="100%">
+</td>
+<td width="50%" align="center" valign="top">
+<h3>Boss list</h3>
+<p>Upcoming bosses, and the gear they drop. A mark shows whether you already own that piece, based on the armory collection in the addon.</p>
+<img src="screenshots/boss-list.png" alt="Boss list with owned drops marked" width="100%">
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" valign="top">
+<h3>Kills, experience, and gold per minute</h3>
+<p>Kills, experience, and gold per minute, and how many enemies are alive.</p>
+<img src="screenshots/rates.png" alt="Kills, experience, and gold per minute" width="100%">
+</td>
+<td width="50%" align="center" valign="top">
+<h3>Guardian timers</h3>
+<p>Each row shows whether that guardian is alive, in combat, or how long until it returns.</p>
+<img src="screenshots/guardians.png" alt="Guardian timers" width="100%">
+</td>
+</tr>
+</table>
 
 ### Boss timer and health bars
 
 Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an estimate of the damage over time.
 
-![Boss timer and boss health bars](screenshots/boss-bars.png)
-
-### Boss list
-
-Upcoming bosses, and the gear they drop. A mark shows whether you already own that piece, based on the armory collection in the addon.
-
-![Boss list with owned drops marked](screenshots/boss-list.png)
-
-### Kills, experience, and gold per minute
-
-Kills, experience, and gold per minute, and how many enemies are alive.
-
-![Kills, experience, and gold per minute](screenshots/rates.png)
-
-### Guardian timers
-
-Each row shows whether that guardian is alive, in combat, or how long until it returns.
-
-![Guardian timers](screenshots/guardians.png)
+<p align="center">
+<img src="screenshots/boss-bars.png" alt="Boss timer and boss health bars" width="720">
+</p>
 
 ### Options
 
