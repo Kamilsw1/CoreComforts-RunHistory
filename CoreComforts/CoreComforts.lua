@@ -2311,448 +2311,605 @@ end
 
 local LearnDots, EffectEstimate, DotDebug
 do
-	local DOT_WINDOW = 6
-	local DOT_LONG = 20
-	local DOT_BREAK = 4
-	local DOT_MIN_SPAN = 0.5
-	local DOT_TICK = 3
-	local DEBUG_EVERY = 3
-	local dotUnits = {}
-	local dotSpells = {}
-	local dotFeed = {}
-	local dotDebug = { on = false, clock = 0, counts = {}, sampled = {}, meter = {} }
-	local DebugReport
+	local function BuildDots()
+		-- Five estimate versions from this chat's history:
+		-- 1 Original: per-stack tick x stacks x ticks left (before the rewrite)
+		-- 2 First rewrite: recent DoT rate x time left (the one that felt best)
+		-- 3 Meter calibrated: same as 2, scaled to the boss damage meter
+		-- 4 Meter calibrated + talent hits (Shadowy Weaving era)
+		-- 5 First rewrite + talent hits (before the multi-version options)
+		local DOT_WINDOW = 6
+		local DOT_BREAK = 4
+		local DOT_MIN_SPAN = 0.5
+		local CAL_MIN_SPAN = 4
+		local DEBUG_EVERY = 3
+		local dotUnits = {}
+		local dotSpells = {}
+		local dotFeed = {}
+		local feedTotals = {}
+		local calHist = {}
+		local calib = {}
+		local dotLoad = {}
+		local bossLoad = {}
+		local bossIds = {}
+		local dotDebug = { on = false, clock = 0, counts = {}, sampled = {}, meter = {} }
+		local DebugReport
 
-	local function DebugNote(event, outcome)
-		if not dotDebug.on then return end
-		local label = event.meterSource
-		if type(label) ~= "string" or label == "" then label = event.abilityName end
-		if type(label) ~= "string" or label == "" then label = "?" end
-		local c = dotDebug.counts[label]
-		if not c then
-			c = { hit = 0, sum = 0, crit = 0, noUnit = 0, noDebuff = 0, direct = 0, directSum = 0, proc = 0, procSum = 0 }
-			dotDebug.counts[label] = c
+		local function DebugNote(event, outcome)
+			if not dotDebug.on then return end
+			local label = event.meterSource
+			if type(label) ~= "string" or label == "" then label = event.abilityName end
+			if type(label) ~= "string" or label == "" then label = "?" end
+			local c = dotDebug.counts[label]
+			if not c then
+				c = { hit = 0, sum = 0, crit = 0, noUnit = 0, noDebuff = 0, direct = 0, directSum = 0, proc = 0, procSum = 0 }
+				dotDebug.counts[label] = c
+			end
+			c[outcome] = c[outcome] + 1
+			if outcome == "hit" then
+				c.sum = c.sum + (Num(event.amount) or 0)
+				if event.critical == true or event.critical == 1 then c.crit = c.crit + 1 end
+			elseif outcome == "direct" then
+				c.directSum = c.directSum + (Num(event.amount) or 0)
+			elseif outcome == "proc" then
+				c.procSum = c.procSum + (Num(event.amount) or 0)
+			end
+			local sampleKey = label .. " " .. outcome
+			if dotDebug.sampled[sampleKey] then return end
+			dotDebug.sampled[sampleKey] = true
+			local keys = {}
+			local k, v
+			for k, v in pairs(event) do
+				if type(v) ~= "table" and type(v) ~= "function" then
+					tinsert(keys, tostring(k) .. "=" .. tostring(v))
+				end
+			end
+			table.sort(keys)
+			Say("DoT event " .. label .. " (" .. outcome .. "): " .. table.concat(keys, " ") .. string.format(" (GetTime %.2f)", GetTime()))
 		end
-		c[outcome] = c[outcome] + 1
-		if outcome == "hit" then
-			c.sum = c.sum + (Num(event.amount) or 0)
-			if event.critical == true or event.critical == 1 then c.crit = c.crit + 1 end
-		elseif outcome == "direct" then
-			c.directSum = c.directSum + (Num(event.amount) or 0)
-		elseif outcome == "proc" then
-			c.procSum = c.procSum + (Num(event.amount) or 0)
+
+		local function DotNow()
+			local t = AZS_GetRunTime and Num(AZS_GetRunTime())
+			return t or GetTime()
 		end
-		local sampleKey = label .. " " .. outcome
-		if dotDebug.sampled[sampleKey] then return end
-		dotDebug.sampled[sampleKey] = true
-		local keys = {}
-		local k, v
-		for k, v in pairs(event) do
-			if type(v) ~= "table" and type(v) ~= "function" then
-				tinsert(keys, tostring(k) .. "=" .. tostring(v))
+
+		local function ClearDots()
+			dotUnits = {}
+			dotSpells = {}
+			feedTotals = {}
+			calHist = {}
+			calib = {}
+		end
+
+		local function EventTime(event, now)
+			local at = Num(event.presentedAt)
+			local real = GetTime()
+			if at and at <= real + 0.5 and at >= real - DOT_WINDOW then
+				return now - (real - at)
+			end
+			return now
+		end
+
+		local function DotMode()
+			local mode = Num(CoreComfortsDB.dotmode)
+			if not mode then return 2 end
+			mode = math.floor(mode + 0.5)
+			if mode < 1 or mode > 5 then return 2 end
+			return mode
+		end
+
+		local function DotRate(rec)
+			local hits = rec.hits
+			local n = table.getn(hits)
+			if n < 2 then return end
+			local span = hits[n].t - hits[1].t
+			if span < DOT_MIN_SPAN then return end
+			local sum = 0
+			local i
+			for i = 2, n do sum = sum + hits[i].amount end
+			return sum / span, span
+		end
+
+		local function ProcRate(rec, now, useCalib)
+			local total = 0
+			if not rec.procs then return total end
+			local label, proc
+			for label, proc in pairs(rec.procs) do
+				local hits = proc.hits
+				local n = table.getn(hits)
+				if n > 0 and now - hits[n].t < DOT_BREAK then
+					local r = DotRate(proc)
+					if r then
+						if useCalib then r = r * (calib[label] or 1) end
+						total = total + r
+					end
+				end
+			end
+			return total
+		end
+
+		local function SampleCalibration(now)
+			local lines = AZS_GetBossMeter and AZS_GetBossMeter()
+			local seen = {}
+			local i
+			for i = 1, Count(lines) do
+				local line = lines[i]
+				if type(line) == "table" and type(line.name) == "string" and Num(line.dmg) then
+					local name = line.name
+					local meter = line.dmg
+					local feed = feedTotals[name] or 0
+					seen[name] = true
+					local hist = calHist[name]
+					if not hist then
+						hist = {}
+						calHist[name] = hist
+					end
+					local n = table.getn(hist)
+					if n > 0 and (meter < hist[n].m or now < hist[n].t) then
+						hist = {}
+						calHist[name] = hist
+						n = 0
+					end
+					if n == 0 or hist[n].m ~= meter or hist[n].f ~= feed or now - hist[n].t >= 1 then
+						tinsert(hist, { t = now, m = meter, f = feed })
+					end
+					while table.getn(hist) > 2 and now - hist[2].t > DOT_WINDOW do
+						table.remove(hist, 1)
+					end
+					n = table.getn(hist)
+					local first = hist[1]
+					local last = hist[n]
+					local dm = last.m - first.m
+					local df = last.f - first.f
+					if n >= 2 and last.t - first.t >= CAL_MIN_SPAN and dm > 0 and df > 0 then
+						local ratio = dm / df
+						if ratio < 0.25 then ratio = 0.25 end
+						if ratio > 8 then ratio = 8 end
+						if calib[name] then calib[name] = calib[name] * 0.9 + ratio * 0.1 else calib[name] = ratio end
+					end
+				end
+			end
+			local name
+			for name in pairs(calHist) do
+				if not seen[name] then calHist[name] = nil end
 			end
 		end
-		table.sort(keys)
-		Say("DoT event " .. label .. " (" .. outcome .. "): " .. table.concat(keys, " ") .. string.format(" (GetTime %.2f)", GetTime()))
-	end
 
-	local function DotNow()
-		local t = AZS_GetRunTime and Num(AZS_GetRunTime())
-		return t or GetTime()
-	end
-
-	local function ClearDots()
-		dotUnits = {}
-		dotSpells = {}
-	end
-
-	local function EventTime(event, now)
-		local at = Num(event.presentedAt)
-		local real = GetTime()
-		if at and at <= real + 0.5 and at >= real - DOT_WINDOW then
-			return now - (real - at)
+		local function MeterRate(name, now)
+			local hist = calHist[name]
+			if not hist or table.getn(hist) < 2 then return end
+			local first = hist[1]
+			local span = now - first.t
+			if span < CAL_MIN_SPAN then return end
+			return (hist[table.getn(hist)].m - first.m) / span
 		end
-		return now
-	end
 
-	local function DotMode()
-		local mode = Num(CoreComfortsDB.dotmode)
-		if not mode then return 1 end
-		mode = math.floor(mode + 0.5)
-		if mode < 1 or mode > 5 then return 1 end
-		return mode
-	end
+		local function UnitLoad(unit)
+			local load = {}
+			local list = AZS_GetDebuffs(unit.id)
+			local i
+			for i = 1, Count(list) do
+				local effect = list[i]
+				if type(effect) == "table" and type(effect.name) == "string" and effect.name ~= "" and effect.permanent ~= true and effect.permanent ~= 1 then
+					local stacks = Num(effect.stacks) or 1
+					if stacks < 1 then stacks = 1 end
+					load[effect.name] = (load[effect.name] or 0) + stacks
+				end
+			end
+			return load
+		end
 
-	-- Damage per second over the ticks inside the window ending at the newest tick.
-	local function DotRate(rec, window)
-		local hits = rec.hits
-		local n = table.getn(hits)
-		local first = 1
-		while first < n and hits[n].t - hits[first].t > window do first = first + 1 end
-		if n - first < 1 then return end
-		local span = hits[n].t - hits[first].t
-		if span < DOT_MIN_SPAN then return end
-		local sum = 0
-		local i
-		for i = first + 1, n do sum = sum + hits[i].amount end
-		return sum / span, span
-	end
+		-- mode: 2/5 feed(+procs), 3/4 feed*calib or meter share(+procs)
+		local function UnitRate(unit, name, now, mode)
+			local rec = dotUnits[unit.id] and dotUnits[unit.id][name]
+			local feed = rec and DotRate(rec)
+			local spell = dotSpells[name]
+			local learned = spell and spell.rate
+			local wantProcs = mode == 4 or mode == 5
+			local wantCalib = mode == 3 or mode == 4
+			local procs = 0
+			if wantProcs and rec then procs = ProcRate(rec, now, wantCalib) end
+			local tick
+			if wantCalib then
+				local factor = calib[name]
+				if feed and factor then
+					tick = feed * factor
+				elseif bossIds[unit.id] then
+					local load = dotLoad[unit.id] and dotLoad[unit.id][name]
+					local total = bossLoad[name]
+					local mr = MeterRate(name, now)
+					if load and total and total > 0 and mr and mr > 0 then tick = mr * load / total end
+				end
+				if not tick and feed then tick = feed end
+				if not tick and learned then
+					local load = dotLoad[unit.id] and dotLoad[unit.id][name]
+					if load then tick = learned * load * (factor or 1) end
+				end
+			else
+				tick = feed or learned
+			end
+			if not tick and procs > 0 then tick = 0 end
+			if not tick then return nil, rec, feed, procs end
+			return tick + procs, rec, feed, procs
+		end
 
-	-- Average tick, the gap between ticks, and the newest tick, inside the window.
-	local function DotTicks(rec, window)
-		local hits = rec.hits
-		local n = table.getn(hits)
-		if n < 1 then return end
-		local first = 1
-		while first < n and hits[n].t - hits[first].t > window do first = first + 1 end
-		local sum = 0
-		local i
-		for i = first, n do sum = sum + hits[i].amount end
-		local gap
-		local span = hits[n].t - hits[first].t
-		if n > first and span >= DOT_MIN_SPAN then gap = span / (n - first) end
-		return sum / (n - first + 1), gap, hits[n].amount
-	end
-
-	local function DotTarget(event, bosses, guardians)
-		local target = event.targetName
-		local named = type(target) == "string" and target ~= ""
-		local id = Num(event.targetId)
-		local i
-		if id then
+		local function DotTarget(event, bosses, guardians)
+			local target = event.targetName
+			local named = type(target) == "string" and target ~= ""
+			local id = Num(event.targetId)
+			local i
+			if id then
+				for i = 1, Count(bosses) do
+					local u = bosses[i]
+					if type(u) == "table" and u.id == id and (not named or u.name == target) then return u end
+				end
+				for i = 1, Count(guardians) do
+					local u = guardians[i]
+					if type(u) == "table" and u.id == id and (not named or u.name == target) then return u end
+				end
+			end
+			if not named then return end
 			for i = 1, Count(bosses) do
 				local u = bosses[i]
-				if type(u) == "table" and u.id == id and (not named or u.name == target) then return u end
+				if type(u) == "table" and u.name == target then return u end
+			end
+			if type(AZS_UNITS) == "table" then
+				local same = 0
+				for i = 1, Count(AZS_UNITS) do
+					local entry = AZS_UNITS[i]
+					if type(entry) == "table" and entry.name == target then same = same + 1 end
+				end
+				if same ~= 1 then return end
 			end
 			for i = 1, Count(guardians) do
 				local u = guardians[i]
-				if type(u) == "table" and u.id == id and (not named or u.name == target) then return u end
+				if type(u) == "table" and u.name == target then return u end
 			end
 		end
-		if not named then return end
-		for i = 1, Count(bosses) do
-			local u = bosses[i]
-			if type(u) == "table" and u.name == target then return u end
-		end
-		if type(AZS_UNITS) == "table" then
-			local same = 0
-			for i = 1, Count(AZS_UNITS) do
-				local entry = AZS_UNITS[i]
-				if type(entry) == "table" and entry.name == target then same = same + 1 end
-			end
-			if same ~= 1 then return end
-		end
-		for i = 1, Count(guardians) do
-			local u = guardians[i]
-			if type(u) == "table" and u.name == target then return u end
-		end
-	end
 
-	local function NoteCombat(event, bosses, guardians, now)
-		if type(event) ~= "table" or event.kind ~= "damage" then return end
-		if event.reflected == true or event.reflected == 1 then return end
-		local amount = Num(event.amount)
-		if not amount or amount <= 0 then return end
-		local periodic = event.periodic == true or event.periodic == 1
-		local ability = event.abilityName
-		if type(ability) ~= "string" or ability == "" then ability = nil end
-		local source = event.meterSource
-		if type(source) ~= "string" or source == "" then source = ability end
-		local borrowed = ability and source and source ~= ability
-		local unit = DotTarget(event, bosses, guardians)
-		if type(unit) ~= "table" or not Num(unit.id) then
-			if periodic then DebugNote(event, "noUnit") end
-			return
-		end
-		if borrowed then
-			DebugNote(event, "proc")
-			return
-		end
-		if not periodic then
-			DebugNote(event, "direct")
-			return
-		end
-		local list = AZS_GetDebuffs(unit.id)
-		local effect
-		local i
-		for i = 1, Count(list) do
-			local candidate = list[i]
-			if type(candidate) == "table" and candidate.permanent ~= true and candidate.permanent ~= 1 then
-				local label = candidate.name
-				if type(label) == "string" and label ~= "" then
-					if label == source or (Num(event.spellId) and Num(candidate.spell) and event.spellId == candidate.spell) then
-						effect = candidate
-						break
-					end
-				end
-			end
-		end
-		local byUnit = dotUnits[unit.id]
-		local name
-		if effect then
-			name = effect.name
-		elseif byUnit and source and byUnit[source] then
-			name = source
-		else
-			DebugNote(event, "noDebuff")
-			return
-		end
-		if not byUnit then
-			byUnit = {}
-			dotUnits[unit.id] = byUnit
-		end
-		local rec = byUnit[name]
-		if not rec then
-			rec = { hits = {} }
-			byUnit[name] = rec
-		end
-		local at = EventTime(event, now)
-		DebugNote(event, "hit")
-		local hits = rec.hits
-		local n = table.getn(hits)
-		local prev
-		if n > 0 then
-			if at - hits[n].t > DOT_BREAK then
-				rec.hits = {}
-				hits = rec.hits
-			else
-				prev = hits[n].t
-			end
-		end
-		tinsert(hits, { t = at, amount = amount })
-		while table.getn(hits) > 1 and at - hits[1].t > DOT_LONG do
-			table.remove(hits, 1)
-		end
-		if not rec.last or at > rec.last then rec.last = at end
-		if effect then
-			local stacks = Num(effect.stacks) or 1
-			if stacks < 1 then stacks = 1 end
-			rec.stacks = stacks
-		end
-		local spell = dotSpells[name]
-		if not spell then
-			spell = { sum = 0, n = 0, gapSum = 0, gapN = 0 }
-			dotSpells[name] = spell
-		end
-		spell.sum = spell.sum + amount
-		spell.n = spell.n + 1
-		if prev and at > prev then
-			spell.gapSum = spell.gapSum + at - prev
-			spell.gapN = spell.gapN + 1
-		end
-		local rate = DotRate(rec, DOT_WINDOW)
-		if rate then
-			if spell.rate then spell.rate = spell.rate * 0.7 + rate * 0.3 else spell.rate = rate end
-		end
-	end
-
-	local function ReadCombatTicks(bosses, guardians, now)
-		if not AZS_GetCombatTextEvents then return end
-		local guard = 0
-		while guard < 5 do
-			guard = guard + 1
-			local batch, err = AZS_GetCombatTextEvents(dotFeed.cursor, 256)
-			if not batch then
-				if type(err) == "table" and err.code == "STREAM_CHANGED" then
-					ClearDots()
-					dotFeed.cursor = nil
-					dotFeed.stream = nil
-				elseif type(err) == "table" and (err.code == "NOT_READY" or err.code == "NOT_IN_WORLD") then
-					dotFeed.cursor = nil
-				end
+		local function NoteCombat(event, bosses, guardians, now)
+			if type(event) ~= "table" or event.kind ~= "damage" then return end
+			if event.reflected == true or event.reflected == 1 then return end
+			local amount = Num(event.amount)
+			if not amount or amount <= 0 then return end
+			local periodic = event.periodic == true or event.periodic == 1
+			local ability = event.abilityName
+			if type(ability) ~= "string" or ability == "" then ability = nil end
+			local source = event.meterSource
+			if type(source) ~= "string" or source == "" then source = ability end
+			local borrowed = ability and source and source ~= ability
+			local unit = DotTarget(event, bosses, guardians)
+			if type(unit) ~= "table" or not Num(unit.id) then
+				if periodic then DebugNote(event, "noUnit") end
 				return
 			end
-			if type(dotFeed.stream) == "string" and type(batch.streamId) == "string" and dotFeed.stream ~= batch.streamId then
-				ClearDots()
+			if source and bossIds[unit.id] then
+				feedTotals[source] = (feedTotals[source] or 0) + amount
 			end
-			dotFeed.stream = batch.streamId
-			if batch.cursor ~= nil then dotFeed.cursor = batch.cursor end
-			local events = batch.events
+			if not periodic and not borrowed then
+				DebugNote(event, "direct")
+				return
+			end
+			local list = AZS_GetDebuffs(unit.id)
+			local effect
 			local i
-			for i = 1, Count(events) do
-				NoteCombat(events[i], bosses, guardians, now)
-			end
-			if batch.hasMore ~= true and batch.hasMore ~= 1 then return end
-		end
-	end
-
-	LearnDots = function()
-		if not On("dotestimate") or not AZS_GetDebuffs then return end
-		local bosses = AZS_GetBosses and AZS_GetBosses()
-		local guardians = AZS_GetGuardians and AZS_GetGuardians()
-		ReadCombatTicks(bosses, guardians, DotNow())
-		local alive = {}
-		local i
-		for i = 1, Count(bosses) do
-			if type(bosses[i]) == "table" and bosses[i].id then alive[bosses[i].id] = true end
-		end
-		for i = 1, Count(guardians) do
-			if type(guardians[i]) == "table" and guardians[i].id then alive[guardians[i].id] = true end
-		end
-		local id
-		for id in pairs(dotUnits) do
-			if not alive[id] then dotUnits[id] = nil end
-		end
-		if DebugReport then DebugReport(bosses, guardians) end
-	end
-
-	-- copies is how many same-name entries the unit has; ticks are read per name,
-	-- so each entry gets an even share. mode picks the version (1 to 5).
-	EffectEstimate = function(unit, effect, copies, mode)
-		if not On("dotestimate") or type(unit) ~= "table" or type(effect) ~= "table" or type(effect.name) ~= "string" then return end
-		if effect.permanent == true or effect.permanent == 1 then return end
-		local left = Num(effect.remaining)
-		if not left or left <= 0 then return end
-		mode = mode or DotMode()
-		local now = DotNow()
-		local rec = dotUnits[unit.id] and dotUnits[unit.id][effect.name]
-		local spell = dotSpells[effect.name]
-		local from = now
-		if rec and rec.last and rec.last <= now and now - rec.last < DOT_BREAK then from = rec.last end
-		local finish = now + left
-		local duration = Num(effect.duration)
-		if duration and duration > 0 and from < finish - duration then from = finish - duration end
-		if finish - from <= 0 then return end
-		local total
-		if mode == 1 or mode == 4 then
-			local window = DOT_WINDOW
-			if mode == 4 then window = DOT_LONG end
-			local rate = rec and DotRate(rec, window)
-			if not rate and spell then rate = spell.rate end
-			if not rate then return end
-			total = rate * (finish - from)
-		else
-			local avg, gap, newest
-			if rec then avg, gap, newest = DotTicks(rec, DOT_WINDOW) end
-			local runTick, runGap
-			if spell and spell.n > 0 then runTick = spell.sum / spell.n end
-			if spell and spell.gapN > 0 then runGap = spell.gapSum / spell.gapN end
-			local tick = avg
-			if mode == 3 then tick = newest end
-			if mode == 5 then
-				tick = runTick
-				gap = runGap or gap
-			end
-			tick = tick or runTick
-			gap = gap or runGap or DOT_TICK
-			if not tick then return end
-			local ticks = math.floor((finish - from) / gap + 0.2)
-			if ticks < 1 then return end
-			total = tick * ticks
-		end
-		local stacks = Num(effect.stacks) or 1
-		if stacks < 1 then stacks = 1 end
-		if rec and rec.stacks and rec.stacks > 0 and stacks ~= rec.stacks then
-			total = total * stacks / rec.stacks
-		end
-		if not copies or copies < 1 then copies = 1 end
-		if total <= 0 then return end
-		return total / copies
-	end
-
-	DebugReport = function(bosses, guardians)
-		if not dotDebug.on then return end
-		local real = GetTime()
-		local span = real - dotDebug.clock
-		if span < DEBUG_EVERY then return end
-		dotDebug.clock = real
-		local label, c
-		for label, c in pairs(dotDebug.counts) do
-			if c.hit + c.proc + c.noUnit + c.noDebuff > 0 then
-				Say(string.format("feed %s: %d ticks (%d crits) %.0f dmg, %d talent hits %.0f dmg (left out), %d direct %.0f dmg; skipped %d no target, %d no debuff",
-					label, c.hit, c.crit, c.sum, c.proc, c.procSum, c.direct, c.directSum, c.noUnit, c.noDebuff))
-			end
-		end
-		dotDebug.counts = {}
-		local meter = {}
-		local lines = AZS_GetBossMeter and AZS_GetBossMeter()
-		local i
-		for i = 1, Count(lines) do
-			local line = lines[i]
-			if type(line) == "table" and type(line.name) == "string" and Num(line.dmg) then meter[line.name] = line.dmg end
-		end
-		local units = {}
-		for i = 1, Count(bosses) do tinsert(units, bosses[i]) end
-		for i = 1, Count(guardians) do
-			local g = guardians[i]
-			if type(g) == "table" and (g.awake == true or g.awake == 1) then tinsert(units, g) end
-		end
-		local u
-		for u = 1, table.getn(units) do
-			local unit = units[u]
-			if u <= 3 and type(unit) == "table" and Num(unit.id) and AZS_GetDebuffs then
-				local list = AZS_GetDebuffs(unit.id)
-				local groups, order = {}, {}
-				for i = 1, Count(list) do
-					local effect = list[i]
-					if type(effect) == "table" and type(effect.name) == "string" and effect.permanent ~= true and effect.permanent ~= 1 then
-						local g = groups[effect.name]
-						if not g then
-							g = { n = 0, stacks = 0, effects = {} }
-							groups[effect.name] = g
-							tinsert(order, effect.name)
+			for i = 1, Count(list) do
+				local candidate = list[i]
+				if type(candidate) == "table" and candidate.permanent ~= true and candidate.permanent ~= 1 then
+					local label = candidate.name
+					if type(label) == "string" and label ~= "" then
+						local match
+						if borrowed then
+							match = label == ability
+						else
+							match = label == source or (Num(event.spellId) and Num(candidate.spell) and event.spellId == candidate.spell)
 						end
-						g.n = g.n + 1
-						g.stacks = g.stacks + (Num(effect.stacks) or 1)
-						tinsert(g.effects, effect)
-						local left = Num(effect.remaining)
-						if left and (not g.left or left > g.left) then g.left = left end
-						if Num(effect.duration) then g.dur = effect.duration end
+						if match then
+							effect = candidate
+							break
+						end
 					end
 				end
-				local o
-				for o = 1, table.getn(order) do
-					local name = order[o]
-					local g = groups[name]
-					local ests = {}
-					local e
-					for mode = 1, 5 do
-						local est = 0
-						for e = 1, table.getn(g.effects) do
-							est = est + (EffectEstimate(unit, g.effects[e], g.n, mode) or 0)
-						end
-						local mark = ""
-						if mode == DotMode() then mark = "*" end
-						tinsert(ests, string.format("v%d%s %.0f", mode, mark, est))
-					end
-					local rec = dotUnits[unit.id] and dotUnits[unit.id][name]
-					local kept = 0
-					local feed, avg, gap
-					if rec then
-						kept = table.getn(rec.hits)
-						feed = DotRate(rec, DOT_WINDOW)
-						avg, gap = DotTicks(rec, DOT_WINDOW)
-					end
-					local meterRate
-					if meter[name] and dotDebug.meter[name] and meter[name] >= dotDebug.meter[name] then
-						meterRate = (meter[name] - dotDebug.meter[name]) / span
-					end
-					Say(string.format("%s / %s: %d entries, %d stacks, %.1fs left of %s, %d ticks kept, %s/s, tick %s every %s, boss meter %s/s; estimates %s",
-						tostring(unit.name), name, g.n, g.stacks, g.left or -1, g.dur and string.format("%.1fs", g.dur) or "?",
-						kept, feed and string.format("%.0f", feed) or "-",
-						avg and string.format("%.0f", avg) or "-", gap and string.format("%.1fs", gap) or "-",
-						meterRate and string.format("%.0f", meterRate) or "-", table.concat(ests, ", ")))
+			end
+			local byUnit = dotUnits[unit.id]
+			local key = source
+			if borrowed then key = ability end
+			local name
+			if effect then
+				name = effect.name
+			elseif byUnit and key and byUnit[key] then
+				name = key
+			else
+				DebugNote(event, "noDebuff")
+				return
+			end
+			if not byUnit then
+				byUnit = {}
+				dotUnits[unit.id] = byUnit
+			end
+			local rec = byUnit[name]
+			if not rec then
+				rec = { hits = {} }
+				byUnit[name] = rec
+			end
+			local at = EventTime(event, now)
+			if borrowed then
+				DebugNote(event, "proc")
+				if not rec.procs then rec.procs = {} end
+				local proc = rec.procs[source]
+				if not proc then
+					proc = { hits = {} }
+					rec.procs[source] = proc
+				end
+				local ph = proc.hits
+				local pn = table.getn(ph)
+				if pn > 0 and at - ph[pn].t > DOT_BREAK then
+					proc.hits = {}
+					ph = proc.hits
+				end
+				tinsert(ph, { t = at, amount = amount })
+				while table.getn(ph) > 1 and at - ph[1].t > DOT_WINDOW do
+					table.remove(ph, 1)
+				end
+				if not rec.last or at > rec.last then rec.last = at end
+				return
+			end
+			DebugNote(event, "hit")
+			local hits = rec.hits
+			local n = table.getn(hits)
+			local prev
+			if n > 0 then
+				if at - hits[n].t > DOT_BREAK then
+					rec.hits = {}
+					hits = rec.hits
+				else
+					prev = hits[n].t
 				end
 			end
+			tinsert(hits, { t = at, amount = amount })
+			while table.getn(hits) > 1 and at - hits[1].t > DOT_WINDOW do
+				table.remove(hits, 1)
+			end
+			if not rec.last or at > rec.last then rec.last = at end
+			local stacks = 1
+			if effect then
+				stacks = Num(effect.stacks) or 1
+				if stacks < 1 then stacks = 1 end
+				rec.stacks = stacks
+			end
+			local spell = dotSpells[name]
+			if not spell then
+				spell = {}
+				dotSpells[name] = spell
+			end
+			-- Original learning: non-crit tick size per stack, and gap between ticks.
+			if event.critical ~= true and event.critical ~= 1 then
+				local one = amount / stacks
+				if spell.dmg then spell.dmg = spell.dmg * 0.8 + one * 0.2 else spell.dmg = one end
+			end
+			if prev and at > prev then
+				local gap = at - prev
+				if gap >= 0.2 and gap <= 12 then
+					if spell.interval then spell.interval = spell.interval * 0.8 + gap * 0.2 else spell.interval = gap end
+				end
+			end
+			local rate = DotRate(rec)
+			if rate then
+				if spell.rate then spell.rate = spell.rate * 0.7 + rate * 0.3 else spell.rate = rate end
+			end
 		end
-		dotDebug.meter = meter
-	end
 
-	DotDebug = function()
-		dotDebug.on = not dotDebug.on
-		dotDebug.clock = GetTime()
-		dotDebug.counts = {}
-		dotDebug.sampled = {}
-		dotDebug.meter = {}
-		if dotDebug.on then
-			Say("DoT debug on. Every 3 seconds it prints the DoT ticks it read, the boss meter, and what each estimate version gives (* is the one in use). /cc dotdebug again stops it.")
-			if not On("dotestimate") then Say("Turn on DoT damage on boss bars in the Experimental tab first, or nothing is read.") end
-		else
-			Say("DoT debug off.")
+		local function ReadCombatTicks(bosses, guardians, now)
+			if not AZS_GetCombatTextEvents then return end
+			local guard = 0
+			while guard < 5 do
+				guard = guard + 1
+				local batch, err = AZS_GetCombatTextEvents(dotFeed.cursor, 256)
+				if not batch then
+					if type(err) == "table" and err.code == "STREAM_CHANGED" then
+						ClearDots()
+						dotFeed.cursor = nil
+						dotFeed.stream = nil
+					elseif type(err) == "table" and (err.code == "NOT_READY" or err.code == "NOT_IN_WORLD") then
+						dotFeed.cursor = nil
+					end
+					return
+				end
+				if type(dotFeed.stream) == "string" and type(batch.streamId) == "string" and dotFeed.stream ~= batch.streamId then
+					ClearDots()
+				end
+				dotFeed.stream = batch.streamId
+				if batch.cursor ~= nil then dotFeed.cursor = batch.cursor end
+				local events = batch.events
+				local i
+				for i = 1, Count(events) do
+					NoteCombat(events[i], bosses, guardians, now)
+				end
+				if batch.hasMore ~= true and batch.hasMore ~= 1 then return end
+			end
 		end
+
+		LearnDots = function()
+			if not On("dotestimate") or not AZS_GetDebuffs then return end
+			local bosses = AZS_GetBosses and AZS_GetBosses()
+			local guardians = AZS_GetGuardians and AZS_GetGuardians()
+			local now = DotNow()
+			local alive = {}
+			dotLoad = {}
+			bossLoad = {}
+			bossIds = {}
+			local i, name, stacks
+			for i = 1, Count(bosses) do
+				local boss = bosses[i]
+				if type(boss) == "table" and Num(boss.id) then
+					alive[boss.id] = true
+					bossIds[boss.id] = true
+					local load = UnitLoad(boss)
+					dotLoad[boss.id] = load
+					for name, stacks in pairs(load) do bossLoad[name] = (bossLoad[name] or 0) + stacks end
+				end
+			end
+			for i = 1, Count(guardians) do
+				local guardian = guardians[i]
+				if type(guardian) == "table" and Num(guardian.id) then
+					alive[guardian.id] = true
+					dotLoad[guardian.id] = UnitLoad(guardian)
+				end
+			end
+			ReadCombatTicks(bosses, guardians, now)
+			SampleCalibration(now)
+			local id
+			for id in pairs(dotUnits) do
+				if not alive[id] then dotUnits[id] = nil end
+			end
+			if DebugReport then DebugReport(bosses, guardians) end
+		end
+
+		EffectEstimate = function(unit, effect, copies, mode)
+			if not On("dotestimate") or type(unit) ~= "table" or type(effect) ~= "table" or type(effect.name) ~= "string" then return end
+			if effect.permanent == true or effect.permanent == 1 then return end
+			local left = Num(effect.remaining)
+			if not left or left <= 0 then return end
+			mode = mode or DotMode()
+			local stacks = Num(effect.stacks) or 1
+			if stacks < 1 then stacks = 1 end
+			local spell = dotSpells[effect.name]
+
+			-- 1: original tick x stacks x ticks left
+			if mode == 1 then
+				if not spell or not spell.dmg or not spell.interval or spell.interval <= 0 then return end
+				local ticksLeft = math.ceil(left / spell.interval - 0.05)
+				if ticksLeft < 1 then return end
+				return spell.dmg * stacks * ticksLeft
+			end
+
+			local now = DotNow()
+			local rate, rec = UnitRate(unit, effect.name, now, mode)
+			if not rate or rate <= 0 then return end
+			if rec and rec.stacks and rec.stacks > 0 and stacks ~= rec.stacks then
+				rate = rate * stacks / rec.stacks
+			end
+			if not copies or copies < 1 then copies = 1 end
+			rate = rate / copies
+			local from = now
+			if rec and rec.last and rec.last <= now and now - rec.last < DOT_BREAK then from = rec.last end
+			local duration = Num(effect.duration)
+			if duration and duration > 0 and from < now + left - duration then from = now + left - duration end
+			local span = now + left - from
+			if span <= 0 then return end
+			return rate * span
+		end
+
+		DebugReport = function(bosses, guardians)
+			if not dotDebug.on then return end
+			local real = GetTime()
+			local span = real - dotDebug.clock
+			if span < DEBUG_EVERY then return end
+			dotDebug.clock = real
+			local label, c
+			for label, c in pairs(dotDebug.counts) do
+				if c.hit + c.proc + c.noUnit + c.noDebuff > 0 then
+					Say(string.format("feed %s: %d ticks (%d crits) %.0f dmg, %d talent hits %.0f dmg, %d direct %.0f dmg; skipped %d no target, %d no debuff; meter factor %s",
+						label, c.hit, c.crit, c.sum, c.proc, c.procSum, c.direct, c.directSum, c.noUnit, c.noDebuff,
+						calib[label] and string.format("%.2f", calib[label]) or "-"))
+				end
+			end
+			dotDebug.counts = {}
+			local meter = {}
+			local lines = AZS_GetBossMeter and AZS_GetBossMeter()
+			local i
+			for i = 1, Count(lines) do
+				local line = lines[i]
+				if type(line) == "table" and type(line.name) == "string" and Num(line.dmg) then meter[line.name] = line.dmg end
+			end
+			local units = {}
+			for i = 1, Count(bosses) do tinsert(units, bosses[i]) end
+			for i = 1, Count(guardians) do
+				local g = guardians[i]
+				if type(g) == "table" and (g.awake == true or g.awake == 1) then tinsert(units, g) end
+			end
+			local u
+			for u = 1, table.getn(units) do
+				local unit = units[u]
+				if u <= 3 and type(unit) == "table" and Num(unit.id) and AZS_GetDebuffs then
+					local list = AZS_GetDebuffs(unit.id)
+					local groups, order = {}, {}
+					for i = 1, Count(list) do
+						local effect = list[i]
+						if type(effect) == "table" and type(effect.name) == "string" and effect.permanent ~= true and effect.permanent ~= 1 then
+							local g = groups[effect.name]
+							if not g then
+								g = { n = 0, stacks = 0, effects = {} }
+								groups[effect.name] = g
+								tinsert(order, effect.name)
+							end
+							g.n = g.n + 1
+							g.stacks = g.stacks + (Num(effect.stacks) or 1)
+							tinsert(g.effects, effect)
+							local left = Num(effect.remaining)
+							if left and (not g.left or left > g.left) then g.left = left end
+							if Num(effect.duration) then g.dur = effect.duration end
+						end
+					end
+					local o
+					for o = 1, table.getn(order) do
+						local name = order[o]
+						local g = groups[name]
+						local ests = {}
+						local e
+						for mode = 1, 5 do
+							local est = 0
+							for e = 1, table.getn(g.effects) do
+								est = est + (EffectEstimate(unit, g.effects[e], g.n, mode) or 0)
+							end
+							local mark = ""
+							if mode == DotMode() then mark = "*" end
+							tinsert(ests, string.format("v%d%s %.0f", mode, mark, est))
+						end
+						local rec = dotUnits[unit.id] and dotUnits[unit.id][name]
+						local kept = 0
+						local feed
+						if rec then
+							kept = table.getn(rec.hits)
+							feed = DotRate(rec)
+						end
+						local used, _, _, procs = UnitRate(unit, name, DotNow(), DotMode())
+						local meterRate
+						if meter[name] and dotDebug.meter[name] and meter[name] >= dotDebug.meter[name] then
+							meterRate = (meter[name] - dotDebug.meter[name]) / span
+						end
+						local spell = dotSpells[name]
+						Say(string.format("%s / %s: %d entries, %d stacks, %.1fs left of %s, %d ticks kept, ticks %s/s + talent %.0f/s = %s/s, meter %s/s factor %s, tick %s every %s; estimates %s",
+							tostring(unit.name), name, g.n, g.stacks, g.left or -1, g.dur and string.format("%.1fs", g.dur) or "?",
+							kept, feed and string.format("%.0f", feed) or "-",
+							procs or 0, used and string.format("%.0f", used) or "-", meterRate and string.format("%.0f", meterRate) or "-",
+							calib[name] and string.format("%.2f", calib[name]) or "-",
+							spell and spell.dmg and string.format("%.0f", spell.dmg) or "-",
+							spell and spell.interval and string.format("%.1fs", spell.interval) or "-",
+							table.concat(ests, ", ")))
+					end
+				end
+			end
+			dotDebug.meter = meter
+		end
+
+		DotDebug = function()
+			dotDebug.on = not dotDebug.on
+			dotDebug.clock = GetTime()
+			dotDebug.counts = {}
+			dotDebug.sampled = {}
+			dotDebug.meter = {}
+			if dotDebug.on then
+				Say("DoT debug on. Every 3 seconds it prints ticks, talent hits, the boss meter, and each history version (* is in use). /cc dotdebug again stops it.")
+				if not On("dotestimate") then Say("Turn on DoT damage on boss bars in the Experimental tab first, or nothing is read.") end
+			else
+				Say("DoT debug off.")
+			end
+		end
+		return LearnDots, EffectEstimate, DotDebug
 	end
+	LearnDots, EffectEstimate, DotDebug = BuildDots()
 end
-
 local function PaintIcon(icon, effect, est)
 	icon.tex:SetTexture(effect.icon)
 	local stacks = Num(effect.stacks)
@@ -3729,15 +3886,15 @@ local optionKeys = {
 	{ header = "Positions", col = 2 },
 	{ key = "locked", label = "Lock positions" },
 	{ header = "Experimental", col = 1, tab = 2 },
-	{ key = "dotestimate", label = "DoT damage on boss bars", tip = "The orange length is the damage your damage-over-time effects should still deal before they run out.|It comes from each DoT's own ticks on that boss, crits and haste included.|Talent hits, like Shadowy Weaving, are left out, since every spell sets them off.|Pick how it is worked out with the numbers below.|/cc dotdebug prints every version side by side." },
-	{ choice = "dotmode", label = "Estimate version", count = 5, default = 1,
-		names = { "Recent rate", "Average tick", "Newest tick", "Long rate", "Run average" },
+	{ key = "dotestimate", label = "DoT damage on boss bars", tip = "The orange length is the damage your damage-over-time effects should still deal before they run out.|The numbers below are the estimate versions from this chat's history, in order.|Version 2 is the default: the first rewrite, which felt best.|/cc dotdebug prints every version side by side." },
+	{ choice = "dotmode", label = "Estimate version", count = 5, default = 2,
+		names = { "Original", "First rewrite", "Meter calibrated", "Meter + talent", "Rewrite + talent" },
 		tips = {
-			"Damage per second from this DoT's ticks over the last 6 seconds, times the seconds it has left.|Follows new stacks, crits, and buffs within a few ticks.|This is the version from before.",
-			"The average tick over the last 6 seconds, times the ticks still to come.|The time between ticks is measured, so haste counts.|Drops by one tick each time a tick lands.",
-			"The newest tick, times the ticks still to come.|Reacts the fastest of all.|A crit makes it jump up until the next tick lands.",
-			"Like version 1, but over the last 20 seconds.|Steadier, and slower to catch up after a new stack or buff.",
-			"This DoT's average tick over the whole run, on every enemy, times the ticks still to come.|The steadiest. Slow to follow gear and level gains during the run."
+			"The estimate before this chat's rewrite.|Average non-crit tick per stack, times stacks, times how many ticks are left.|Uses the measured time between ticks.|Often jumped up and down with the red health.",
+			"The first rewrite from this chat, the one that felt best.|Damage per second from this DoT's ticks on that boss over the last 6 seconds, times the seconds left.|Talent hits are left out.|Crits and haste are in the rate. Settles after the first ticks.",
+			"Same as version 2, then scaled to the boss damage meter.|Tries to fix missing stacks in the combat feed.|Needs a few seconds of meter data. Can start large, then settle.",
+			"Version 3 plus talent hits a DoT tick sets off, like Shadowy Weaving.|Those hits are added into this DoT's remaining damage.|On high-health bosses the talent part can dwarf the tick itself.",
+			"Version 2 plus talent hits, with no meter correction.|What we had just before the multi-version options.|Talent hits count; the boss meter does not scale the rate."
 		} },
 	{ key = "nameplates", label = "Guardian and boss nameplates", tip = "Shows nameplates for guardians and bosses only.|Turn on enemy nameplates in the game options, or no plates are shown.|Other enemies are hidden while this is on.|A normal enemy with the same name as one of them still shows." },
 	{ key = "luckodds", label = "Luck and card chances", tip = "Shows your luck and the estimated chance of a Rare, Epic, or Legendary card.|It stays up before a run too, at 0% until the run begins.|Spells, rings, and trinkets share one column. Amulets are higher.|One percent is added for each level, up to 30%.|Drag the panel to move it." },
