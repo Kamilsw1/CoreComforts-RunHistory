@@ -12,6 +12,10 @@ Direction arrows for a cache and a guardian. Kill count, gold, and caches. The c
 
 ![Direction arrows, tally line, and equipped jewelry](screenshots/hud.png)
 
+Minimap icons for guardians and caches. A guardian shows as alive, in combat, or dead. A dead one shows a countdown when it is close to coming back. The icons scale with the minimap zoom.
+
+![Minimap pins for guardians and caches](screenshots/minimap.png)
+
 Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an estimate of the damage over time.
 
 ![Boss timer and boss health bars](screenshots/boss-bars.png)
@@ -28,17 +32,9 @@ Guardian timers. Each row shows whether that guardian is alive, in combat, or ho
 
 ![Guardian timers](screenshots/guardians.png)
 
-Luck, and the chance of rare, epic, and legendary spells and amulets.
-
-![Luck and card chances](screenshots/luck.png)
-
 The options window. Each option can be turned on or off. Caches you can buy is under UI, just below kills, gold, and cache, and it starts on.
 
 ![Core Comforts options](screenshots/options.jpg)
-
-Experimental options for damage-over-time estimates, luck, decimal places, and guardian and boss nameplates. Decimal places are not very useful, because the game appears to round to one decimal place. Nameplates are only offered here.
-
-![Experimental options](screenshots/experimental.png)
 
 The armory. Gear from each map and boss. It updates when you get a drop. The addon cannot read your current collection, but you can edit the collection and check the items you already owned before installing it. Right now it only records whether you own a specific item. Star ranks, 1 through 5, are not supported yet. I might look into that later.
 
