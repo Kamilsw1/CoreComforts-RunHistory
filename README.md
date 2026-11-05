@@ -1,10 +1,10 @@
 # Azeroth Survivors addons
 
-Core Comforts and Run History are addons for [Azeroth Survivors](https://azerothsurvivors.app/). They run in the game's 1.12 client (`## Interface: 11200`).
+Core Comforts (and armory) and Run History are addons for [Azeroth Survivors](https://azerothsurvivors.app/).
 
 ## Core Comforts
 
-Boss and guardian health bars, with debuffs and an estimate of damage over time. Guardian timers, and minimap pins for guardians and caches. Every option can be turned on or off. `/cc` opens the window.
+Boss and guardian health bars, with debuffs and an experimental estimate of damage over time. Guardian timers, and minimap pins for guardians and caches. Every option can be turned on or off. `/cc` opens the window.
 
 ### Direction arrows, tally, and jewelry
 
@@ -23,6 +23,9 @@ Direction arrows for a cache and a guardian. Kill count, gold, and caches. The c
 <h3>Boss list</h3>
 <p>Upcoming bosses, and the gear they drop. A mark shows whether you already own that piece, based on the armory collection in the addon.</p>
 <img src="screenshots/boss-list.png" alt="Boss list with owned drops marked" width="100%">
+<h3>Guardian timers</h3>
+<p>Each row shows whether that guardian is alive, in combat, or how long until it returns.</p>
+<img src="screenshots/guardians.png" alt="Guardian timers" width="100%">
 </td>
 </tr>
 <tr>
@@ -32,20 +35,12 @@ Direction arrows for a cache and a guardian. Kill count, gold, and caches. The c
 <img src="screenshots/rates.png" alt="Kills, experience, and gold per minute" width="100%">
 </td>
 <td width="50%" align="center" valign="top">
-<h3>Guardian timers</h3>
-<p>Each row shows whether that guardian is alive, in combat, or how long until it returns.</p>
-<img src="screenshots/guardians.png" alt="Guardian timers" width="100%">
+<h3>Boss timer and health bars</h3>
+<p>Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an experimental estimate of the damage over time.</p>
+<img src="screenshots/boss-bars.png" alt="Boss timer and boss health bars" width="100%">
 </td>
 </tr>
 </table>
-
-### Boss timer and health bars
-
-Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an estimate of the damage over time.
-
-<p align="center">
-<img src="screenshots/boss-bars.png" alt="Boss timer and boss health bars" width="720">
-</p>
 
 ### Options
 
