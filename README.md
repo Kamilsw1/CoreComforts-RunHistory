@@ -1,6 +1,6 @@
 # Azeroth Survivors addons
 
-Core Comforts and Run Stats are addons for [Azeroth Survivors](https://azerothsurvivors.app/). They run in the game's 1.12 client (`## Interface: 11200`).
+Core Comforts and Run History are addons for [Azeroth Survivors](https://azerothsurvivors.app/). They run in the game's 1.12 client (`## Interface: 11200`).
 
 ## Core Comforts
 
@@ -40,14 +40,14 @@ The armory. Gear from each map and boss. It updates when you get a drop. The add
 
 ![Armory, with owned pieces checked](screenshots/armory.jpg)
 
-## Run Stats
+## Run History
 
-Saves each run and compares kills per minute by class, map, difficulty, and spec. `/stats` opens the window.
+Saves each run and compares kills per minute by class, map, difficulty, and spec. `/history` opens the window.
 
 ## Install
 
-On Windows and Linux, copy the `CoreComforts` folder, the `RunStats` folder, or both into `benilla-config/AddOns/` next to the game. The addons load on the next world entry.
+On Windows and Linux, copy the `CoreComforts` folder, the `RunHistory` folder, or both into `benilla-config/AddOns/` next to the game. The addons load on the next world entry.
 
-In the browser client, open Options, then AddOns, and install a zip of one addon folder. The zip should contain that folder itself (`CoreComforts` or `RunStats`), not an extra parent folder.
+In the browser client, open Options, then AddOns, and install a zip of one addon folder. The zip should contain that folder itself (`CoreComforts` or `RunHistory`), not an extra parent folder.
 
 Saved settings stay on your computer. They are not part of this repository.

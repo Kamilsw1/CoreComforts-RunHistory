@@ -113,10 +113,11 @@ local function Living(lair)
 end
 
 ----------------------------------------------------------------
--- Target health, written in full (170000 / 200000)
+-- Target health and resource, written in full (170000 / 200000)
 ----------------------------------------------------------------
 
 local healthText
+local targetPowerText
 local playerHealthText
 local playerPowerText
 local playerHealthState = {}
@@ -232,6 +233,19 @@ end
 
 local function UpdateHealth()
 	healthText = PaintHealth(TargetFrameHealthBar, healthText, "health", "target", "CoreComfortsHealthText")
+	targetPowerText = EnsureBarText(TargetFrameManaBar, targetPowerText, "CoreComfortsTargetPowerText")
+	if not targetPowerText then return end
+	local current, maximum
+	if On("health") and UnitExists("target") and UnitMana and UnitManaMax then
+		current = UnitMana("target")
+		maximum = UnitManaMax("target")
+	end
+	if not Num(current) or not Num(maximum) or maximum <= 0 then
+		targetPowerText:SetText("")
+		return
+	end
+	targetPowerText:SetText(Whole(current) .. " / " .. Whole(maximum))
+	targetPowerText:Show()
 end
 
 local function UpdatePlayerBars(dt, force)
@@ -3687,7 +3701,7 @@ optionsTitle:SetText("Core Comforts")
 local optionBoxes = {}
 local optionKeys = {
 	{ header = "Health numbers", col = 1, tab = 1 },
-	{ key = "health", label = "Target health numbers" },
+	{ key = "health", label = "Target health and resource", tip = "Writes the target's health on its health bar, and its mana, rage, or energy on its resource bar.|Both are the full numbers, such as 170000 / 200000.|A target with no resource leaves that bar blank." },
 	{ key = "playerhealth", label = "Your health numbers" },
 	{ slider = "healthrate", label = "Update speed", min = 0.01, max = 0.50, default = 0.05, step = 0.01, low = "0.01", high = "0.50", tip = "How often your health number refreshes.|0.01 updates on the next frame.|0.50 is twice a second." },
 	{ key = "power", label = "Your mana, rage, or energy" },

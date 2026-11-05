@@ -1,6 +1,6 @@
--- Run Stats: one saved sheet when the final boss dies (Full run) and one at
+-- Run History: one saved sheet when the final boss dies (Full run) and one at
 -- the real end including endless (Endless). The list defaults to this class,
--- this map, and this difficulty. Kills per minute is the sort. /stats toggles
+-- this map, and this difficulty. Kills per minute is the sort. /history toggles
 -- the window.
 
 -- One table so the file stays under Lua 5.0's 200 locals.
@@ -111,7 +111,7 @@ local lastOwed = 0
 
 local function Say(msg)
 	if DEFAULT_CHAT_FRAME then
-		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00Run Stats|r: " .. msg)
+		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00Run History|r: " .. msg)
 	end
 end
 
@@ -3555,7 +3555,7 @@ local function BuildList()
 
 	local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	title:SetPoint("TOP", frame, "TOP", 0, -8)
-	title:SetText("Run Stats")
+	title:SetText("Run History")
 
 	local close = MakeButton(frame, 52, 18)
 	close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -6)
@@ -3794,7 +3794,7 @@ local function BuildMinimap()
 	btn:SetScript("OnEnter", function()
 		if not GameTooltip then return end
 		GameTooltip:SetOwner(this, "ANCHOR_LEFT")
-		GameTooltip:SetText("Run Stats")
+		GameTooltip:SetText("Run History")
 		GameTooltip:AddLine("Left-click: open", 1, 1, 1)
 		GameTooltip:AddLine("Drag: move", 1, 1, 1)
 		GameTooltip:Show()
@@ -4036,7 +4036,7 @@ local function PerfStart()
 	end
 	perfDepth = 0
 	debugprofilestart()
-	Say("perf started. Play a while, then /stats perf show (keeps going) or /stats perf (stops).")
+	Say("perf started. Play a while, then /history perf show (keeps going) or /history perf (stops).")
 end
 
 local function PerfReport()
@@ -4070,7 +4070,7 @@ end
 
 PerfCommand = function(rest)
 	if rest == "show" then
-		if perf then PerfReport() else Say("perf is not running. /stats perf starts it.") end
+		if perf then PerfReport() else Say("perf is not running. /history perf starts it.") end
 		return
 	end
 	if perf then
@@ -4097,7 +4097,7 @@ driver:SetScript("OnEvent", function()
 		if not getglobal("RunStatsMinimapButton") then BuildMinimap() end
 		if not told then
 			told = true
-			Say("loaded. /stats opens the list. The minimap button opens it too.")
+			Say("loaded. /history opens the list. The minimap button opens it too.")
 		end
 	end
 end)
@@ -4108,7 +4108,7 @@ driver:SetScript("OnUpdate", function()
 	Tick()
 end)
 
-SLASH_RUNSTATS1 = "/stats"
+SLASH_RUNSTATS1 = "/history"
 SlashCmdList["RUNSTATS"] = function(msg)
 	if not ready then
 		Say("still loading.")

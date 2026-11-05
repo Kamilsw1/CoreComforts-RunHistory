@@ -1,0 +1,7 @@
+## Interface: 11200
+## Title: Run History
+## Notes: Saves each run and compares kills per minute by class, map, difficulty, and spec. /history
+## Version: 0.2
+## Author: Kamil
+## SavedVariables: RunStatsDB
+RunHistory.lua
