@@ -36,13 +36,29 @@ The options window. Each option can be turned on or off. Caches you can buy is u
 
 ![Core Comforts options](screenshots/options.jpg)
 
-The armory. Gear from each map and boss. It updates when you get a drop. The addon cannot read your current collection, but you can edit the collection and check the items you already owned before installing it. Right now it only records whether you own a specific item. Star ranks, 1 through 5, are not supported yet. I might look into that later.
+The armory. Gear from each map and boss. It updates when you get a drop. The addon cannot read your current collection, but you can edit the collection and check the items you already owned before installing it. It also shows your total marks, and the marks collected this run.
 
 ![Armory, with owned pieces checked](screenshots/armory.jpg)
 
 ## Run History
 
 Saves each run and compares kills per minute by class, map, difficulty, and spec. `/history` opens the window.
+
+The run list. Filter by class, map, and difficulty. Switch between the full run and endless, and between the average pace and the last minute. The minimum length hides shorter runs, from 0 to 16 minutes.
+
+![Run list, with class, map, and difficulty filters](screenshots/history.jpg)
+
+Details for one run. Kills, damage, gold, and the character's stats.
+
+![Run details, with kills and character stats](screenshots/history-stats.png)
+
+Spells, jewelry, and damage done.
+
+![Spells, jewelry, and damage done](screenshots/history-build.png)
+
+Damage for the last minute, damage taken, and pickups over time.
+
+![Damage taken and pickups over time](screenshots/history-pickups.png)
 
 ## Install
 
