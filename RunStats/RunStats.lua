@@ -9,7 +9,15 @@ local CFG = {
 	ROW_H = 24,
 	MIN_TIME = 600,
 	MARK = 1200,
+	MIN_MAX = 16,
+	FRAME_W = 880,
 	ROMAN = { "I", "II", "III", "IV", "V" },
+	CLASS_ORDER = { "warrior", "paladin", "hunter", "rogue", "priest", "shaman", "mage", "warlock", "druid" },
+	STAT_KEYS = {
+		"crit", "cm", "dmg", "haste", "doth",
+		"area", "echo", "cnt", "bp", "luck", "arm", "spd", "lch",
+		"hp", "reg", "pick", "heal", "thn", "liv", "dots", "sxp", "sgold",
+	},
 	CLASS_COLOR = {
 		warrior = { 0.78, 0.61, 0.43 },
 		paladin = { 0.96, 0.55, 0.73 },
@@ -20,6 +28,20 @@ local CFG = {
 		mage = { 0.41, 0.80, 0.94 },
 		warlock = { 0.58, 0.51, 0.79 },
 		druid = { 1.00, 0.49, 0.04 },
+	},
+	MAPS = {
+		{ key = "elwynn", name = "Elwynn Forest" },
+		{ key = "duskwood", name = "Duskwood" },
+		{ key = "wsg", name = "Warsong Gulch" },
+		{ key = "ungoro", name = "Un'Goro Crater" },
+		{ key = "ab", name = "Arathi Basin" },
+		{ key = "feralas", name = "Feralas" },
+		{ key = "arena", name = "Gurubashi Arena" },
+		{ key = "sm", name = "Scarlet Monastery" },
+		{ key = "av", name = "Alterac Valley" },
+		{ key = "brm", name = "Blackrock Mountain" },
+		{ key = "aq", name = "Gates of Ahn'Qiraj" },
+		{ key = "naxx", name = "Naxxramas" },
 	},
 }
 
@@ -62,17 +84,8 @@ local COLS = {
 	{ key = "race", text = "Race", x = 708, w = 62 },
 }
 
-local FRAME_W = 880
-
-local STAT_KEYS = {
-	"crit", "cm", "dmg", "haste", "doth",
-	"area", "echo", "cnt", "bp", "luck", "arm", "spd", "lch",
-	"hp", "reg", "pick", "heal", "thn", "liv", "dots", "sxp", "sgold",
-}
-
 local ready = false
 local told = false
-local pinnedClass = nil
 local page = 1
 local shown = {}
 local anchorCache = nil
@@ -102,10 +115,23 @@ local function Say(msg)
 	end
 end
 
+local function ResetRoundFilters()
+	-- Only min length is kept between rounds; the rest follow the new run.
+	RunStatsDB.classFilter = nil
+	RunStatsDB.mapFilter = nil
+	RunStatsDB.diff = nil
+	RunStatsDB.full = 1
+	RunStatsDB.lastMin = nil
+	RunStatsDB.allClasses = nil
+	RunStatsDB.allMaps = nil
+end
+
 local function InitDB()
 	if not RunStatsDB then RunStatsDB = {} end
 	if not RunStatsDB.runs then RunStatsDB.runs = {} end
 	if not RunStatsDB.sort then RunStatsDB.sort = "kpm" end
+	if RunStatsDB.minTime == nil then RunStatsDB.minTime = 0 end
+	ResetRoundFilters()
 	if RunStatsDB.mmCorner ~= 1 then
 		RunStatsDB.mmAngle = -math.pi * 0.75
 		RunStatsDB.mmCorner = 1
@@ -116,6 +142,22 @@ local function Num(v)
 	local n = tonumber(v)
 	if not n then return 0 end
 	return n
+end
+
+local function MinMins()
+	if not RunStatsDB or RunStatsDB.minTime == nil then return 0 end
+	local n = math.floor(Num(RunStatsDB.minTime) / 60)
+	if n < 0 then n = 0 end
+	if n > CFG.MIN_MAX then n = CFG.MIN_MAX end
+	return n
+end
+
+local function MinSecs()
+	return MinMins() * 60
+end
+
+local function MinLabel()
+	return "Min " .. tostring(MinMins()) .. "m"
 end
 
 local function Flag(v)
@@ -778,8 +820,8 @@ end
 
 local function WriteStats(dst, src)
 	local i
-	for i = 1, table.getn(STAT_KEYS) do
-		local key = STAT_KEYS[i]
+	for i = 1, table.getn(CFG.STAT_KEYS) do
+		local key = CFG.STAT_KEYS[i]
 		dst[key] = Num(src[key])
 	end
 end
@@ -902,8 +944,8 @@ local function MakeSheet(rec, id, t)
 	WriteStats(sheet, stats)
 	if type(rec.pending) == "table" then
 		local i
-		for i = 1, table.getn(STAT_KEYS) do
-			local key = STAT_KEYS[i]
+		for i = 1, table.getn(CFG.STAT_KEYS) do
+			local key = CFG.STAT_KEYS[i]
 			if Num(sheet[key]) == 0 and Num(rec.pending[key]) ~= 0 then
 				sheet[key] = Num(rec.pending[key])
 			end
@@ -1926,9 +1968,17 @@ local function Anchor()
 end
 
 local function ViewClass(ctx)
-	if RunStatsDB and RunStatsDB.allClasses == 1 then return "" end
-	if pinnedClass and pinnedClass ~= "" then return pinnedClass end
-	return ctx.class or ""
+	local f = RunStatsDB and RunStatsDB.classFilter
+	if f == "all" then return "all" end
+	if type(f) == "string" and f ~= "" then return f end
+	return (ctx and ctx.class) or ""
+end
+
+local function ViewMap(ctx)
+	local f = RunStatsDB and RunStatsDB.mapFilter
+	if f == "all" then return "all" end
+	if type(f) == "string" and f ~= "" then return f end
+	return (ctx and ctx.zone) or ""
 end
 
 local function ViewDiff(ctx)
@@ -1942,17 +1992,37 @@ end
 local function KnownClasses()
 	local list = {}
 	local have = {}
-	local runs = RunStatsDB.runs
 	local i
-	local ctx = Anchor()
-	if ctx.class ~= "" and not have[ctx.class] then
-		have[ctx.class] = ClassName(ctx.class, ctx.cname)
-		tinsert(list, ctx.class)
+	for i = 1, table.getn(CFG.CLASS_ORDER) do
+		local key = CFG.CLASS_ORDER[i]
+		have[key] = ClassName(key)
+		tinsert(list, key)
 	end
+	local runs = RunStatsDB.runs
 	for i = 1, table.getn(runs) do
 		local key = runs[i].class
 		if type(key) == "string" and key ~= "" and not have[key] then
 			have[key] = ClassName(key, runs[i].cname)
+			tinsert(list, key)
+		end
+	end
+	return list, have
+end
+
+local function KnownMaps()
+	local list = {}
+	local have = {}
+	local i
+	for i = 1, table.getn(CFG.MAPS) do
+		local m = CFG.MAPS[i]
+		have[m.key] = m.name
+		tinsert(list, m.key)
+	end
+	local runs = RunStatsDB.runs
+	for i = 1, table.getn(runs) do
+		local key = runs[i].zone
+		if type(key) == "string" and key ~= "" and not have[key] then
+			have[key] = runs[i].zname or Pretty(key)
 			tinsert(list, key)
 		end
 	end
@@ -2028,6 +2098,7 @@ end
 local function Collect()
 	local ctx = Anchor()
 	local class = ViewClass(ctx)
+	local mapFilter = ViewMap(ctx)
 	local diff = ViewDiff(ctx)
 	local full = RunStatsDB.full == 1
 	local list = {}
@@ -2036,10 +2107,10 @@ local function Collect()
 	for i = 1, table.getn(runs) do
 		local rec = runs[i]
 		local sheet = SheetFor(rec, full)
-		local longEnough = Duration(rec) >= CFG.MIN_TIME or rec.watched == 1
+		local longEnough = Duration(rec) >= MinSecs() or rec.watched == 1
 		if rec.party ~= 1 and sheet and longEnough then
-			local classOk = (class == "" or rec.class == class or not rec.class or rec.class == "")
-			local mapOk = RunStatsDB.allMaps == 1 or ctx.zone == "" or not rec.zone or rec.zone == "" or rec.zone == ctx.zone
+			local classOk = class == "all" or class == "" or rec.class == class or not rec.class or rec.class == ""
+			local mapOk = mapFilter == "all" or mapFilter == "" or not rec.zone or rec.zone == "" or rec.zone == mapFilter
 			local diffOk = diff < 0 or DiffLevel(rec.heroic) == diff
 			if mapOk and diffOk and classOk then
 				Consider(list, rec, sheet)
@@ -2721,15 +2792,32 @@ local function Refresh()
 	shown = list
 	local class = ViewClass(ctx)
 	local _, names = KnownClasses()
-	local cname = names[class] or ctx.cname or "No class"
-	if RunStatsDB.allClasses == 1 then cname = "All classes" end
+	local cname = "No class"
+	if class == "all" then
+		cname = "All classes"
+	elseif class ~= "" then
+		cname = names[class] or ClassName(class, ctx.cname)
+	elseif ctx.cname and ctx.cname ~= "" then
+		cname = ctx.cname
+	end
+	local mapFilter = ViewMap(ctx)
+	local _, mapNames = KnownMaps()
+	local mapLabel = "No map"
+	if mapFilter == "all" then
+		mapLabel = "All maps"
+	elseif mapFilter ~= "" then
+		mapLabel = mapNames[mapFilter] or Pretty(mapFilter)
+	elseif ctx.zname and ctx.zname ~= "" then
+		mapLabel = ctx.zname
+	end
 	local windowLabel = "Full run"
 	if RunStatsDB.full == 1 then windowLabel = "Endless" end
 	local diff = ViewDiff(ctx)
-	sub:SetText(cname .. "  ·  " .. (ctx.zname or "No map") .. "  ·  " .. DiffName(diff))
-	classBtn.label:SetText(Cap(cname, 16))
-	mapBtn.label:SetText(RunStatsDB.allMaps == 1 and "All maps" or "This map")
+	sub:SetText(cname .. "  ·  " .. mapLabel .. "  ·  " .. DiffName(diff))
+	classBtn.label:SetText(Cap(cname, 14))
+	mapBtn.label:SetText(Cap(mapLabel, 14))
 	if diffBtn then diffBtn.label:SetText(DiffName(diff)) end
+	if frame and frame.minBtn then frame.minBtn.label:SetText(MinLabel()) end
 	windowBtn.label:SetText(windowLabel)
 	if frame.paceBtn then
 		if RunStatsDB.lastMin == 1 then
@@ -2807,7 +2895,12 @@ local function Refresh()
 	end
 	local n = table.getn(list)
 	if n == 0 then
-		foot:SetText("No runs of 10 minutes or more for this filter. Party runs stay hidden.")
+		local need = MinSecs()
+		if need <= 0 then
+			foot:SetText("No runs for this filter. Party runs stay hidden.")
+		else
+			foot:SetText("No runs of " .. tostring(math.floor(need / 60)) .. " minutes or more for this filter. Party runs stay hidden.")
+		end
 		pageText:SetText("")
 	else
 		local last = start + CFG.PAGE
@@ -2818,10 +2911,15 @@ local function Refresh()
 	PaintHeaders()
 end
 
-local ToggleDiffMenu
+local ToggleDiffMenu, ToggleMinMenu, ToggleClassMenu, ToggleMapMenu
 
 local function HideDiffMenu()
 	if diffMenu then diffMenu:Hide() end
+	if frame then
+		if frame.minMenu then frame.minMenu:Hide() end
+		if frame.classMenu then frame.classMenu:Hide() end
+		if frame.mapMenu then frame.mapMenu:Hide() end
+	end
 end
 
 local function Toggle()
@@ -2949,6 +3047,170 @@ ToggleDiffMenu = function()
 	diffMenu:Raise()
 end
 
+ToggleMinMenu = function()
+	if not frame or not frame.minBtn then return end
+	if not frame.minMenu then
+		local menu = CreateFrame("Frame", "RunStatsMinMenu", UIParent)
+		menu:SetWidth(180)
+		menu:SetHeight(54)
+		menu:SetFrameStrata("TOOLTIP")
+		menu:SetBackdrop({
+			bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+			tile = true, tileSize = 8, edgeSize = 8,
+			insets = { left = 2, right = 2, top = 2, bottom = 2 },
+		})
+		menu:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+		menu:SetBackdropBorderColor(0.9, 0.75, 0.25, 0.95)
+		menu:EnableMouse(true)
+		menu:Hide()
+		frame.minMenu = menu
+		local title = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		title:SetPoint("TOP", menu, "TOP", 0, -6)
+		title:SetTextColor(0.9, 0.85, 0.7)
+		menu.title = title
+		local slider = CreateFrame("Slider", "RunStatsMinSlider", menu)
+		slider:SetPoint("TOPLEFT", menu, "TOPLEFT", 14, -24)
+		slider:SetPoint("TOPRIGHT", menu, "TOPRIGHT", -14, -24)
+		slider:SetHeight(16)
+		slider:SetOrientation("HORIZONTAL")
+		slider:SetMinMaxValues(0, CFG.MIN_MAX)
+		if slider.SetValueStep then slider:SetValueStep(1) end
+		slider:SetValue(MinMins())
+		slider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+		local track = slider:CreateTexture(nil, "BACKGROUND")
+		track:SetTexture("Interface\\Buttons\\UI-SliderBar-Background")
+		track:SetAllPoints(slider)
+		local low = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		low:SetPoint("BOTTOMLEFT", menu, "BOTTOMLEFT", 10, 6)
+		low:SetText("0")
+		low:SetTextColor(0.7, 0.65, 0.5)
+		local high = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		high:SetPoint("BOTTOMRIGHT", menu, "BOTTOMRIGHT", -10, 6)
+		high:SetText(tostring(CFG.MIN_MAX))
+		high:SetTextColor(0.7, 0.65, 0.5)
+		frame.minSlider = slider
+		slider:SetScript("OnValueChanged", function()
+			if this.busy then return end
+			local mins = math.floor(this:GetValue() + 0.5)
+			if mins < 0 then mins = 0 end
+			if mins > CFG.MIN_MAX then mins = CFG.MIN_MAX end
+			RunStatsDB.minTime = mins * 60
+			if frame.minMenu and frame.minMenu.title then
+				frame.minMenu.title:SetText("Minimum: " .. tostring(mins) .. " min")
+			end
+			if frame.minBtn then frame.minBtn.label:SetText(MinLabel()) end
+			page = 1
+			Refresh()
+		end)
+	end
+	local menu = frame.minMenu
+	if menu:IsShown() then
+		HideDiffMenu()
+		return
+	end
+	HideDiffMenu()
+	if frame.minSlider then
+		frame.minSlider.busy = 1
+		frame.minSlider:SetValue(MinMins())
+		frame.minSlider.busy = nil
+	end
+	menu.title:SetText("Minimum: " .. tostring(MinMins()) .. " min")
+	menu:ClearAllPoints()
+	menu:SetPoint("TOPLEFT", frame.minBtn, "BOTTOMLEFT", 0, -2)
+	menu:Show()
+	menu:Raise()
+end
+
+do
+	local function MakeFilterMenu(name, width, rows)
+		local menu = CreateFrame("Frame", name, UIParent)
+		menu:SetWidth(width)
+		menu:SetHeight(table.getn(rows) * 20 + 8)
+		menu:SetFrameStrata("TOOLTIP")
+		menu:SetBackdrop({
+			bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+			tile = true, tileSize = 8, edgeSize = 8,
+			insets = { left = 2, right = 2, top = 2, bottom = 2 },
+		})
+		menu:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+		menu:SetBackdropBorderColor(0.9, 0.75, 0.25, 0.95)
+		menu:EnableMouse(true)
+		menu:Hide()
+		local i
+		for i = 1, table.getn(rows) do
+			local row = rows[i]
+			local b = MakeButton(menu, width - 10, 18)
+			b:SetPoint("TOPLEFT", menu, "TOPLEFT", 5, -4 - (i - 1) * 20)
+			b.pick = row.id
+			b.label:SetText(row.text)
+			b:SetScript("OnClick", function()
+				row.apply(this.pick)
+				HideDiffMenu()
+				page = 1
+				anchorCache = nil
+				Refresh()
+			end)
+		end
+		return menu
+	end
+
+	ToggleClassMenu = function()
+		if not classBtn then return end
+		if frame.classMenu and frame.classMenu:IsShown() then
+			HideDiffMenu()
+			return
+		end
+		HideDiffMenu()
+		if not frame.classMenu then
+			local rows = { { id = "all", text = "All classes", apply = function(id) RunStatsDB.classFilter = id end } }
+			local list, names = KnownClasses()
+			local i
+			for i = 1, table.getn(list) do
+				local key = list[i]
+				tinsert(rows, {
+					id = key,
+					text = names[key] or ClassName(key),
+					apply = function(id) RunStatsDB.classFilter = id end,
+				})
+			end
+			frame.classMenu = MakeFilterMenu("RunStatsClassMenu", 120, rows)
+		end
+		frame.classMenu:ClearAllPoints()
+		frame.classMenu:SetPoint("TOPLEFT", classBtn, "BOTTOMLEFT", 0, -2)
+		frame.classMenu:Show()
+		frame.classMenu:Raise()
+	end
+
+	ToggleMapMenu = function()
+		if not mapBtn then return end
+		if frame.mapMenu and frame.mapMenu:IsShown() then
+			HideDiffMenu()
+			return
+		end
+		HideDiffMenu()
+		if not frame.mapMenu then
+			local list, names = KnownMaps()
+			local rows = { { id = "all", text = "All maps", apply = function(id) RunStatsDB.mapFilter = id end } }
+			local i
+			for i = 1, table.getn(list) do
+				local key = list[i]
+				tinsert(rows, {
+					id = key,
+					text = Cap(names[key] or Pretty(key), 22),
+					apply = function(id) RunStatsDB.mapFilter = id end,
+				})
+			end
+			frame.mapMenu = MakeFilterMenu("RunStatsMapMenu", 150, rows)
+		end
+		frame.mapMenu:ClearAllPoints()
+		frame.mapMenu:SetPoint("TOPLEFT", mapBtn, "BOTTOMLEFT", 0, -2)
+		frame.mapMenu:Show()
+		frame.mapMenu:Raise()
+	end
+end
+
 PlaceDetails = function()
 	if not pop or not frame then return end
 	pop:ClearAllPoints()
@@ -2964,7 +3226,7 @@ PlaceWindow = function()
 		if GetScreenWidth then sw = GetScreenWidth() end
 		local sh = 768
 		if GetScreenHeight then sh = GetScreenHeight() end
-		local left = (sw - (FRAME_W + 6 + 480)) / 2
+		local left = (sw - (CFG.FRAME_W + 6 + 480)) / 2
 		if left < 12 then left = 12 end
 		local top = (sh / 2) + (430 / 2) + 40
 		frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
@@ -3076,29 +3338,47 @@ local function DoDelete()
 end
 
 local function BuildFilters()
+	local function Tip(btn, title, a, b, c)
+		btn:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+			if not GameTooltip then return end
+			GameTooltip:SetOwner(this, "ANCHOR_BOTTOM")
+			GameTooltip:SetText(title, 1, 0.82, 0)
+			if a then GameTooltip:AddLine(a, 1, 1, 1, 1) end
+			if b then GameTooltip:AddLine(b, 0.9, 0.9, 0.85, 1) end
+			if c then GameTooltip:AddLine(c, 0.9, 0.9, 0.85, 1) end
+			GameTooltip:Show()
+		end)
+		btn:SetScript("OnLeave", function()
+			this:SetBackdropBorderColor(0.55, 0.45, 0.2, 0.9)
+			HideTip()
+		end)
+	end
+
 	classBtn = MakeButton(frame, 110, 20)
 	classBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -46)
-	classBtn:SetScript("OnClick", function()
-		HideDiffMenu()
-		if RunStatsDB.allClasses == 1 then RunStatsDB.allClasses = nil else RunStatsDB.allClasses = 1 end
-		page = 1
-		anchorCache = nil
-		Refresh()
-	end)
+	classBtn:SetScript("OnClick", function() ToggleClassMenu() end)
+	Tip(classBtn, "Class filter",
+		"All classes: every class in the list.",
+		"Or pick one class.",
+		"Default is your current class.")
 
-	mapBtn = MakeButton(frame, 84, 20)
+	mapBtn = MakeButton(frame, 100, 20)
 	mapBtn:SetPoint("LEFT", classBtn, "RIGHT", 6, 0)
-	mapBtn:SetScript("OnClick", function()
-		HideDiffMenu()
-		if RunStatsDB.allMaps == 1 then RunStatsDB.allMaps = nil else RunStatsDB.allMaps = 1 end
-		page = 1
-		Refresh()
-	end)
+	mapBtn:SetScript("OnClick", function() ToggleMapMenu() end)
+	Tip(mapBtn, "Map filter",
+		"All maps: every map in the list.",
+		"Or pick one map.",
+		"Default is your current map.")
 
 	diffBtn = MakeButton(frame, 104, 20)
 	diffBtn:SetPoint("LEFT", mapBtn, "RIGHT", 6, 0)
 	diffBtn.label:SetText("Normal")
 	diffBtn:SetScript("OnClick", function() ToggleDiffMenu() end)
+	Tip(diffBtn, "Difficulty filter",
+		"Any difficulty: every difficulty in the list.",
+		"Or pick Normal through Heroic V.",
+		"Default is the difficulty of your current run.")
 
 	windowBtn = MakeButton(frame, 100, 20)
 	windowBtn:SetPoint("LEFT", diffBtn, "RIGHT", 6, 0)
@@ -3108,6 +3388,10 @@ local function BuildFilters()
 		page = 1
 		Refresh()
 	end)
+	Tip(windowBtn, "Full run / Endless",
+		"Full run: stats up to when the final boss died.",
+		"Endless: the whole session, including play after the win.",
+		"Default is Endless.")
 
 	local paceBtn = MakeButton(frame, 84, 20)
 	paceBtn:SetPoint("LEFT", windowBtn, "RIGHT", 6, 0)
@@ -3120,11 +3404,32 @@ local function BuildFilters()
 		Refresh()
 		PaintHeaders()
 	end)
+	Tip(paceBtn, "Average / Last min",
+		"Average: K/min, XP/min, G/min and DPS for the whole sheet.",
+		"Last min: those rates for the final minute only.",
+		"Click to switch. A dash means last minute was not saved.")
 
 	liveBtn = MakeButton(frame, 78, 20)
 	liveBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -46)
 	liveBtn.label:SetText("This run")
-	liveBtn:SetScript("OnClick", function() InspectCurrent() end)
+	liveBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		InspectCurrent()
+	end)
+	Tip(liveBtn, "This run",
+		"Save a snapshot of the run you are in right now.",
+		"It appears in the list (even under the min time) and opens Details.",
+		"Use it mid-run to check pace, meter, and build.")
+
+	local minBtn = MakeButton(frame, 72, 20)
+	minBtn:SetPoint("RIGHT", liveBtn, "LEFT", -6, 0)
+	minBtn.label:SetText(MinLabel())
+	frame.minBtn = minBtn
+	minBtn:SetScript("OnClick", function() ToggleMinMenu() end)
+	Tip(minBtn, "Minimum run length",
+		"Only show runs at least this many minutes long.",
+		"0 minutes = show every run. Drag up to 16.",
+		"This setting is kept between runs.")
 end
 
 local function BuildRows()
@@ -3152,7 +3457,7 @@ local function BuildRows()
 	local r
 	for r = 1, CFG.PAGE do
 		local holder = CreateFrame("Frame", nil, frame)
-		holder:SetWidth(FRAME_W - 16)
+		holder:SetWidth(CFG.FRAME_W - 16)
 		holder:SetHeight(CFG.ROW_H)
 		holder:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -88 - (r - 1) * CFG.ROW_H)
 		local bg = holder:CreateTexture(nil, "BACKGROUND")
@@ -3198,7 +3503,7 @@ end
 
 local function BuildList()
 	frame = CreateFrame("Frame", "RunStatsFrame", UIParent)
-	frame:SetWidth(FRAME_W)
+	frame:SetWidth(CFG.FRAME_W)
 	frame:SetHeight(430)
 	frame:SetFrameStrata("DIALOG")
 	frame:SetMovable(true)
@@ -3552,7 +3857,7 @@ local function Tick()
 	end
 	if sessionId ~= id then
 		sessionId = id
-		pinnedClass = nil
+		ResetRoundFilters()
 		anchorCache = nil
 		lastOwed = 0
 		CloseOpen(id)
