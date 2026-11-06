@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: Core Comforts
 ## Notes: Full target health and resource, a kill/gold/cache line, guardian timers, minimap pins and arrows, and an armory.
-## Version: 0.1
+## Version: 0.2
 ## Author: Kamil
 ## SavedVariables: CoreComfortsDB
 ArmoryData.lua
