@@ -1,6 +1,6 @@
 # Azeroth Survivors addons
 
-Core Comforts (and armory) and Run History are addons for [Azeroth Survivors](https://azerothsurvivors.app/).
+Core Comforts and Run History are addons for [Azeroth Survivors](https://azerothsurvivors.app/).
 
 ## Core Comforts
 
