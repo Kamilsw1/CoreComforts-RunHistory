@@ -3064,12 +3064,13 @@ end
 
 local function UpdateDebuffs(dt)
 	EnsureBosses()
-	if not On("debuffs") or not (InRun() or Staging()) then
-		if not On("debuffs") then ShowStockBosses() end
+	-- Ready phase has no bosses yet, and this bar cannot be dragged then.
+	if not On("debuffs") or not InRun() then
+		if not On("debuffs") or Staging() then ShowStockBosses() end
 		bossGroup:Hide()
 		return
 	end
-	if InRun() then HideStockBosses() else ShowStockBosses() end
+	HideStockBosses()
 	LearnDots()
 	local units = {}
 	local seenId = {}
@@ -3149,29 +3150,6 @@ local function UpdateDebuffs(dt)
 		bossRows[i]:Hide()
 	end
 	if shown < 1 then
-		if Staging() then
-			local row = BossRow(1)
-			row.name:SetText("Boss")
-			row.bar:SetStatusBarColor(0.9, 0.12, 0.08)
-			row.orange:SetMinMaxValues(0, 1)
-			row.orange:SetValue(0)
-			row.bar:SetMinMaxValues(0, 1)
-			row.bar:SetValue(1)
-			local e
-			for e = 1, BAR_ICONS do
-				row.icons[e]:Hide()
-			end
-			row:SetHeight(22)
-			row:ClearAllPoints()
-			row:SetPoint("TOP", bossGroup, "TOP", 0, 0)
-			row:Show()
-			for i = 2, table.getn(bossRows) do
-				bossRows[i]:Hide()
-			end
-			bossGroup:SetHeight(28)
-			bossGroup:Show()
-			return
-		end
 		bossGroup:Hide()
 		return
 	end
@@ -3501,6 +3479,25 @@ local function BuildLuck()
 		return string.format("%.1f%%", n or 0)
 	end
 
+	local function StatPlaces()
+		local n = Num(CoreComfortsDB.statdecimals)
+		if not n then n = 0 end
+		n = math.floor(n + 0.5)
+		if n < 0 then n = 0 end
+		if n > 4 then n = 4 end
+		return n
+	end
+
+	local function FormatLuckPct(frac)
+		local n = tonumber(frac) or 0
+		local places = StatPlaces()
+		local pct = n * 100
+		if places < 1 then
+			return string.format("%.0f%%", math.floor(pct + 0.5))
+		end
+		return string.format("%." .. places .. "f%%", pct)
+	end
+
 	local function Lift(shown)
 		if not AZS_SetOnTopOfScreens then return end
 		pcall(AZS_SetOnTopOfScreens, frame, shown and true or false)
@@ -3565,8 +3562,8 @@ local function BuildLuck()
 		if lvl < 0 then lvl = 0 end
 		local bonus = lvl * 0.01
 		if bonus > 0.30 then bonus = 0.30 end
-		luckValue:SetText(math.floor(luck * 100 + 0.5) .. "%")
-		levelNote:SetText("+" .. math.floor(bonus * 100 + 0.5) .. "% from level")
+		luckValue:SetText(FormatLuckPct(luck))
+		levelNote:SetText("+" .. FormatLuckPct(bonus) .. " from level")
 		local k = 1 + luck + bonus
 		local rare, epic, legend = Odds(k)
 		local amuletRare, amuletEpic, amuletLegend = Odds(k + 0.5)
@@ -3594,9 +3591,8 @@ BuildLuck()
 -- Driver
 ----------------------------------------------------------------
 
-local ToggleOptions
-local BuildMinimap
-local PlaceMinimap
+local ToggleOptions, BuildMinimap, PlaceMinimap, BuildOptions
+local CharDec, BarCd = {}, {}
 
 local driver = CreateFrame("Frame", "CoreComfortsDriver")
 driver:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -3648,6 +3644,7 @@ driver:SetScript("OnEvent", function()
 		if BuildMinimap then BuildMinimap() end
 	elseif event == "PLAYER_LOGIN" then
 		if BuildMinimap then BuildMinimap() end
+		if CharDec.Setup then CharDec.Setup() end
 		if not told then
 			told = true
 			Say("loaded. /cc opens options. The minimap button opens it too.")
@@ -3830,6 +3827,9 @@ SetupNameplates()
 local function SetupCooldownDecimals()
 	local cooldownSlot
 	local cooldownFixer
+	local nameToKey = {}
+	local iconToKey = {}
+	local mapKey = nil
 
 	local function CooldownPlaces()
 		local n = Num(CoreComfortsDB.decimals)
@@ -3840,7 +3840,48 @@ local function SetupCooldownDecimals()
 		return n
 	end
 
-	local function SpellAtSlot(slot)
+	local function NormTex(path)
+		if type(path) ~= "string" or path == "" then return end
+		path = string.lower(path)
+		path = string.gsub(path, "/", "\\")
+		return path
+	end
+
+	local function SpellIdKey(spell)
+		if type(spell) ~= "table" then return end
+		if type(spell.key) == "string" and spell.key ~= "" then
+			return "k:" .. spell.key
+		end
+		local id = Num(spell.spell)
+		if id then return "s:" .. tostring(id) end
+	end
+
+	local function LiveSpell(idKey)
+		if not idKey or type(AZS_SPELLS) ~= "table" then return end
+		local i
+		for i = 1, table.getn(AZS_SPELLS) do
+			local spell = AZS_SPELLS[i]
+			if SpellIdKey(spell) == idKey then return spell end
+		end
+	end
+
+	local function ListIdentity()
+		if type(AZS_SPELLS) ~= "table" then return "" end
+		local key = tostring(table.getn(AZS_SPELLS))
+		local i
+		for i = 1, table.getn(AZS_SPELLS) do
+			key = key .. ";" .. (SpellIdKey(AZS_SPELLS[i]) or "")
+		end
+		return key
+	end
+
+	local function ClearSpellMaps()
+		nameToKey = {}
+		iconToKey = {}
+		mapKey = nil
+	end
+
+	local function OrderSpell(slot)
 		slot = Num(slot)
 		if not slot or type(AZS_SPELLS) ~= "table" then return end
 		slot = math.floor(slot + 0.5)
@@ -3848,6 +3889,90 @@ local function SetupCooldownDecimals()
 		if n < 1 then return end
 		if slot == 12 then return AZS_SPELLS[n] end
 		if slot >= 1 and slot <= n - 1 then return AZS_SPELLS[slot] end
+	end
+
+	local function SlotTexture(slot)
+		if not slot then return end
+		local icon = getglobal("ActionButton" .. slot .. "Icon")
+		if icon and icon.GetTexture then
+			local path = icon:GetTexture()
+			if type(path) == "string" and path ~= "" then return path end
+		end
+		if GetActionTexture then
+			local ok, path = pcall(GetActionTexture, slot)
+			if ok and type(path) == "string" and path ~= "" then return path end
+		end
+	end
+
+	local function SpellMapFresh()
+		if type(AZS_SPELLS) ~= "table" then
+			ClearSpellMaps()
+			return
+		end
+		local identity = ListIdentity()
+		if mapKey == identity then return end
+		local oldIcons = iconToKey
+		local oldNames = nameToKey
+		ClearSpellMaps()
+		mapKey = identity
+		local alive = {}
+		local i
+		for i = 1, table.getn(AZS_SPELLS) do
+			local idKey = SpellIdKey(AZS_SPELLS[i])
+			if idKey then alive[idKey] = true end
+		end
+		local tex, idKey
+		for tex, idKey in pairs(oldIcons) do
+			if alive[idKey] then iconToKey[tex] = idKey end
+		end
+		local name
+		for name, idKey in pairs(oldNames) do
+			if alive[idKey] then nameToKey[name] = idKey end
+		end
+		for i = 1, 12 do
+			local spell = OrderSpell(i)
+			idKey = SpellIdKey(spell)
+			local slotTex = NormTex(SlotTexture(i))
+			if slotTex and idKey and not iconToKey[slotTex] then
+				iconToKey[slotTex] = idKey
+			end
+		end
+	end
+
+	local function RememberSpell(spell, name, icon)
+		local idKey = SpellIdKey(spell)
+		if not idKey then return end
+		if type(name) == "string" and name ~= "" then nameToKey[name] = idKey end
+		icon = NormTex(icon)
+		if icon then iconToKey[icon] = idKey end
+	end
+
+	local function TipSpellName()
+		local left = getglobal("GameTooltipTextLeft1")
+		local name = left and left.GetText and left:GetText()
+		if type(name) == "string" and name ~= "" then return name end
+	end
+
+	-- Slot / icon first. Never trust the tip's cooldown number alone: after we
+	-- rewrite one tip to 8.8000, the next hover can still read that value for
+	-- a frame and pin every spell to the longest CD.
+	local function SpellForAction(slot)
+		SpellMapFresh()
+		local name = TipSpellName()
+		if name and nameToKey[name] then
+			local live = LiveSpell(nameToKey[name])
+			if live then return live end
+		end
+		local icon = NormTex(SlotTexture(slot))
+		if icon and iconToKey[icon] then
+			local live = LiveSpell(iconToKey[icon])
+			if live then return live end
+		end
+		local ordered = OrderSpell(slot)
+		if ordered then
+			RememberSpell(ordered, name, icon)
+			return ordered
+		end
 	end
 
 	local function SlotFromTooltip()
@@ -3879,7 +4004,8 @@ local function SetupCooldownDecimals()
 		local places = CooldownPlaces()
 		if places < 1 then return end
 		if not GameTooltip or not GameTooltip.IsShown or not GameTooltip:IsShown() then return end
-		local spell = SpellAtSlot(SlotFromTooltip())
+		local slot = SlotFromTooltip()
+		local spell = SpellForAction(slot)
 		if not spell then return end
 		local cd = Num(spell.cdmax)
 		if not cd then return end
@@ -3891,6 +4017,7 @@ local function SetupCooldownDecimals()
 			PaintCooldownLine(getglobal("GameTooltipTextLeft" .. i), formatted)
 			PaintCooldownLine(getglobal("GameTooltipTextRight" .. i), formatted)
 		end
+		RememberSpell(spell, TipSpellName(), SlotTexture(slot))
 	end
 
 	cooldownFixer = CreateFrame("Frame", "CoreComfortsCooldownFixer")
@@ -3927,7 +4054,494 @@ local function SetupCooldownDecimals()
 end
 SetupCooldownDecimals()
 
-local function BuildOptions()
+----------------------------------------------------------------
+-- Action bar: cooldown countdown from AZS_SPELLS.cd
+----------------------------------------------------------------
+
+BarCd.Setup = function()
+	if BarCd.done then return end
+	BarCd.done = true
+	-- Ceil + unit suffix + near-ready colors. Remaining time from AZS_SPELLS.cd
+	-- (GetActionCooldown is not wired on this client).
+	local CD_INTERVAL = 0.1
+	local CD_ZERO = 0.1
+	local CD_REARM = 0.5
+	local CD_FINAL = 0.25
+	local CD_UNITS = { { 86400, "d" }, { 3600, "h" }, { 60, "m" }, { 1, "" } }
+	local texts = {}
+	-- Texture path -> stable spell id key. Must NOT rebuild on AZS_SPELLS_UPDATED
+	-- (that fires every CD tick and would re-bind swapped icons to stock order).
+	local iconToKey = {}
+	local mapKey = nil
+	-- Armed CDs count down through 0.1. Idle melee noise (~0.1 while out of
+	-- range) never arms, so it stays hidden until a real CD starts.
+	local cdArmed = {}
+	local cdLast = {}
+	local finishing = false
+	local elapsed = 0
+
+	local function EnsureText(button)
+		if not button then return end
+		local fs = button.CoreComfortsBarCd
+		if fs then return fs end
+		local size = 14
+		if button.GetHeight then
+			local h = button:GetHeight()
+			if type(h) == "number" and h > 0 then
+				size = math.min(14, h * 0.64)
+			end
+		end
+		fs = button:CreateFontString(nil, "OVERLAY")
+		fs:SetFont("Fonts\\FRIZQT__.TTF", size, "OUTLINE")
+		fs:SetPoint("CENTER", button, "CENTER", 0, 0)
+		fs:SetTextColor(1, 1, 1)
+		fs:SetShadowColor(0, 0, 0, 1)
+		fs:SetShadowOffset(1, -1)
+		fs:SetText("")
+		button.CoreComfortsBarCd = fs
+		tinsert(texts, fs)
+		return fs
+	end
+
+	local function ClearTexts()
+		finishing = false
+		cdArmed = {}
+		cdLast = {}
+		local i
+		for i = 1, table.getn(texts) do
+			texts[i]:SetText("")
+		end
+	end
+
+	local function NormTex(path)
+		if type(path) ~= "string" or path == "" then return end
+		path = string.lower(path)
+		path = string.gsub(path, "/", "\\")
+		return path
+	end
+
+	local function SpellIdKey(spell)
+		if type(spell) ~= "table" then return end
+		if type(spell.key) == "string" and spell.key ~= "" then
+			return "k:" .. spell.key
+		end
+		local id = Num(spell.spell)
+		if id then return "s:" .. tostring(id) end
+	end
+
+	local function LiveSpell(idKey)
+		if not idKey or type(AZS_SPELLS) ~= "table" then return end
+		local i
+		for i = 1, table.getn(AZS_SPELLS) do
+			local spell = AZS_SPELLS[i]
+			if SpellIdKey(spell) == idKey then return spell end
+		end
+	end
+
+	local function ListIdentity()
+		if type(AZS_SPELLS) ~= "table" then return "" end
+		local key = tostring(table.getn(AZS_SPELLS))
+		local i
+		for i = 1, table.getn(AZS_SPELLS) do
+			key = key .. ";" .. (SpellIdKey(AZS_SPELLS[i]) or "")
+		end
+		return key
+	end
+
+	local function SpellIcon(spell)
+		if type(spell) ~= "table" or not Num(spell.spell) or not GetSpellTexture then return end
+		local ok, tex = pcall(GetSpellTexture, spell.spell)
+		if ok and type(tex) == "string" and tex ~= "" then return tex end
+	end
+
+	local function OrderSpell(slot)
+		slot = Num(slot)
+		if not slot or type(AZS_SPELLS) ~= "table" then return end
+		slot = math.floor(slot + 0.5)
+		local n = table.getn(AZS_SPELLS)
+		if n < 1 then return end
+		if slot == 12 then return AZS_SPELLS[n] end
+		if slot >= 1 and slot <= n - 1 then return AZS_SPELLS[slot] end
+	end
+
+	-- Prefer the painted icon: after a swap GetActionTexture can lag behind.
+	local function SlotTexture(slot)
+		local icon = getglobal("ActionButton" .. slot .. "Icon")
+		if icon and icon.GetTexture then
+			local path = icon:GetTexture()
+			if type(path) == "string" and path ~= "" then return path end
+		end
+		if GetActionTexture then
+			local ok, path = pcall(GetActionTexture, slot)
+			if ok and type(path) == "string" and path ~= "" then return path end
+		end
+	end
+
+	local function KeyAlreadyBound(idKey)
+		if not idKey then return end
+		local tex, bound
+		for tex, bound in pairs(iconToKey) do
+			if bound == idKey then return true end
+		end
+	end
+
+	local function RefreshIconMap()
+		if type(AZS_SPELLS) ~= "table" then
+			iconToKey = {}
+			mapKey = nil
+			return
+		end
+		local identity = ListIdentity()
+		if mapKey == identity then return end
+		local old = iconToKey
+		iconToKey = {}
+		mapKey = identity
+		local alive = {}
+		local i
+		for i = 1, table.getn(AZS_SPELLS) do
+			local idKey = SpellIdKey(AZS_SPELLS[i])
+			if idKey then alive[idKey] = true end
+			local icon = NormTex(SpellIcon(AZS_SPELLS[i]))
+			if icon and idKey then iconToKey[icon] = idKey end
+		end
+		-- Keep prior icon bindings for spells that are still on the bar.
+		local tex, idKey
+		for tex, idKey in pairs(old) do
+			if alive[idKey] and not iconToKey[tex] then
+				iconToKey[tex] = idKey
+			end
+		end
+		-- Fill gaps from stock order (new spells / first run).
+		for i = 1, 12 do
+			local spell = OrderSpell(i)
+			local slotTex = NormTex(SlotTexture(i))
+			idKey = SpellIdKey(spell)
+			if slotTex and idKey and not iconToKey[slotTex] and not KeyAlreadyBound(idKey) then
+				iconToKey[slotTex] = idKey
+			end
+		end
+	end
+
+	local function SpellForSlot(slot)
+		if not slot or type(AZS_SPELLS) ~= "table" then return end
+		RefreshIconMap()
+		local tex = NormTex(SlotTexture(slot))
+		if tex and iconToKey[tex] then
+			local live = LiveSpell(iconToKey[tex])
+			if live then return live end
+		end
+		local ordered = OrderSpell(slot)
+		local idKey = SpellIdKey(ordered)
+		if tex and idKey and not iconToKey[tex] and not KeyAlreadyBound(idKey) then
+			iconToKey[tex] = idKey
+		end
+		return ordered
+	end
+
+	-- AZS_SPELLS.cd only refreshes a few times per second; subtract age so the
+	-- last 0.1–0.2s does not sit on screen after the spell is usable again.
+	local function RemainingCd(spell)
+		local cd = Num(spell and spell.cd)
+		if not cd or cd <= 0 then return 0 end
+		local updated = Num(AZS_SPELLS_UPDATED)
+		if updated then
+			local age = GetTime() - updated
+			if age > 0 then cd = cd - age end
+		end
+		if cd < 0 then return 0 end
+		return cd
+	end
+
+	local function VisibleCd(spell, remaining)
+		remaining = Num(remaining) or 0
+		local idKey = SpellIdKey(spell)
+		if not idKey then
+			if remaining < CD_ZERO then return 0 end
+			return remaining
+		end
+		local prev = cdLast[idKey] or 0
+		cdLast[idKey] = remaining
+		-- Arm on a real CD (or a clear jump). Tiny ready-boundary spikes do not.
+		if remaining >= CD_REARM or remaining > prev + 0.25 then
+			cdArmed[idKey] = true
+		elseif remaining < CD_ZERO then
+			cdArmed[idKey] = nil
+		end
+		if not cdArmed[idKey] then return 0 end
+		if remaining < CD_ZERO then return 0 end
+		return remaining
+	end
+
+	local function FormatBarCd(cd)
+		cd = Num(cd)
+		if not cd or cd < CD_ZERO then return "" end
+		if cd < 1 then
+			return string.format("%.1f", math.floor(cd * 10) / 10)
+		end
+		local i
+		for i = 1, table.getn(CD_UNITS) do
+			local unit = CD_UNITS[i]
+			if cd >= unit[1] or unit[1] == 1 then
+				return tostring(math.ceil(cd / unit[1])) .. unit[2]
+			end
+		end
+		return ""
+	end
+
+	local function PaintSlot(slot)
+		local button = getglobal("ActionButton" .. slot)
+		local fs = EnsureText(button)
+		if not fs then return end
+		local text = ""
+		local remaining = nil
+		local has = true
+		if HasAction then
+			local ok, yes = pcall(HasAction, slot)
+			if ok then has = yes and true or false end
+		end
+		if has then
+			local spell = SpellForSlot(slot)
+			if spell then
+				remaining = VisibleCd(spell, RemainingCd(spell))
+				text = FormatBarCd(remaining)
+			end
+		end
+		fs:SetText(text)
+		if text ~= "" and remaining then
+			local r, g, b = 1, 1, 1
+			if remaining < 1 then
+				g, b = 85 / 255, 85 / 255
+			elseif math.ceil(remaining) < 5 then
+				b = 85 / 255
+			end
+			fs:SetTextColor(r, g, b)
+		end
+		return remaining
+	end
+
+	local i
+	for i = 1, 12 do
+		EnsureText(getglobal("ActionButton" .. i))
+	end
+
+	BarCd.Update = function()
+		if not On("barcd") then
+			ClearTexts()
+			return
+		end
+		if type(AZS_SPELLS) ~= "table" or table.getn(AZS_SPELLS) < 1 then
+			ClearTexts()
+			return
+		end
+		finishing = false
+		local slot
+		for slot = 1, 12 do
+			local remaining = PaintSlot(slot)
+			if remaining and remaining > 0 and remaining <= CD_FINAL then
+				finishing = true
+			end
+		end
+	end
+
+	local controller = CreateFrame("Frame")
+	controller:SetScript("OnUpdate", function()
+		if not On("barcd") then return end
+		elapsed = elapsed + (arg1 or 0)
+		if not finishing and elapsed < CD_INTERVAL then return end
+		elapsed = 0
+		BarCd.Update()
+	end)
+end
+BarCd.Setup()
+
+----------------------------------------------------------------
+-- Character panel (C) and Run Stats: stat decimals slider
+----------------------------------------------------------------
+
+CharDec.Setup = function()
+	if CharDec.done then return end
+	if type(AZS_Update) ~= "function" or type(AZS_Pct) ~= "function" or type(AZS_Row) ~= "function" then
+		return
+	end
+	CharDec.done = true
+
+	local stockUpdate = AZS_Update
+	local stockPct = AZS_Pct
+	local stockMore = AZS_UpdateMore
+
+	local function StatPlaces()
+		local n = Num(CoreComfortsDB.statdecimals)
+		if not n then n = 0 end
+		n = math.floor(n + 0.5)
+		if n < 0 then n = 0 end
+		if n > 4 then n = 4 end
+		return n
+	end
+
+	local function FormatAzsNum(value)
+		local n = tonumber(value) or 0
+		local places = StatPlaces()
+		if places < 1 then
+			return string.format("%.0f", math.floor(n + 0.5))
+		end
+		return string.format("%." .. places .. "f", n)
+	end
+
+	local function SignedPct(v)
+		local places = StatPlaces()
+		local pct = (tonumber(v) or 0) * 100
+		if places < 1 then return stockPct(v) end
+		return string.format("%+." .. places .. "f%%", pct)
+	end
+
+	local function UnsignedPct(v)
+		local places = StatPlaces()
+		local pct = (tonumber(v) or 0) * 100
+		if places < 1 then return string.format("%.0f%%", pct) end
+		return string.format("%." .. places .. "f%%", pct)
+	end
+
+	local function GearText(v, text)
+		if AZS_Gear then return AZS_Gear(v, text) end
+		return ""
+	end
+
+	local function PaintMore(s)
+		if type(stockMore) == "function" and StatPlaces() < 1 then
+			stockMore()
+			return
+		end
+		if not AZS_MoreRow then
+			if type(stockMore) == "function" then stockMore() end
+			return
+		end
+		if not AZSMoreStats then
+			if type(stockMore) == "function" then stockMore() end
+			if StatPlaces() < 1 then return end
+		end
+		if not AZSMoreStats then return end
+		local title = getglobal("AZSMoreStatsTitle")
+		if title then title:SetText("Run Stats") end
+		local rows = {
+			{ "Lifesteal", UnsignedPct(s.lch), "Heals you for this much of all the damage you deal.", true },
+			{ "Kill Heal", FormatAzsNum(s.heal), "Every kill heals you for this much.", true },
+			{ "Thorns", UnsignedPct(s.thn), "This much of the melee damage you take is dealt back to the attacker.", true },
+			{ "Lives", string.format("%d", tonumber(s.liv) or 0), "Times you rise again instead of dying.", true },
+			{ "Experience", SignedPct(s.xp - 1), "You gain this much more experience.", true },
+			{ "Gold", SignedPct(s.gold - 1), "You find this much more gold." .. GearText(s.ggold, SignedPct(s.ggold) .. " gold"), true },
+			{ "Luck", SignedPct(s.luck), "Better odds of rarer upgrades when you level up.", true },
+			{ "Buff Power", SignedPct(s.bp), "Your damage, haste, shield and thorns buffs are this much stronger.", true },
+			{ "DoT Stacks", string.format("%d", tonumber(s.dots) or 0), "How many of each of your damage-over-time effects one enemy carries at once.", true },
+			{ "DoT Haste", SignedPct(s.doth), "Your damage-over-time effects tick this much faster.", true },
+			{ "Vs Elites", SignedPct(s.big), "More damage to elites and bosses.", s.big ~= 0 },
+			{ "Execute", SignedPct(s.exe), "More damage to enemies below 30% health.", s.exe ~= 0 },
+			{ "Vs Controlled", SignedPct(s.cc), "More damage to rooted, stunned, slowed or fleeing enemies.", s.cc ~= 0 },
+			{ "Vs Afflicted", SignedPct(s.dotd), "More damage to enemies carrying one of your damage-over-time effects.", s.dotd ~= 0 },
+			{ "Shielded", SignedPct(s.shd), "More damage while you hold an absorb shield.", s.shd ~= 0 },
+			{ "Melee", SignedPct(s.auto), "Your melee swings deal this much more damage.", s.auto ~= 0 },
+			{ "Pet Damage", SignedPct(s.pet), "Your pets deal this much more damage.", s.pet ~= 0 }
+		}
+		local n = 0
+		local i
+		for i = 1, table.getn(rows) do
+			local r = rows[i]
+			local row = AZS_MoreRow(i)
+			if r[4] then
+				row:ClearAllPoints()
+				row:SetPoint("TOPLEFT", AZSMoreStats, "TOPLEFT", 12, -30 - 14 * n)
+				row.label:SetText(r[1] .. ":")
+				row.value:SetText(r[2])
+				row.azsTitle = r[1] .. " " .. r[2]
+				row.azsText = r[3]
+				row:Show()
+				n = n + 1
+			else
+				row:Hide()
+			end
+		end
+		AZSMoreStats:SetHeight(40 + 14 * n)
+		AZSMoreStats:Show()
+	end
+
+	local function PaintMain()
+		local s = AZS_STATS
+		if type(s) ~= "table" then return end
+		if StatPlaces() < 1 then
+			stockUpdate()
+			return
+		end
+		local storm = ""
+		if AZS_Stormguard then storm = AZS_Stormguard(s) or "" end
+		AZS_Row("CharacterStatFrame1", "Health", FormatAzsNum(s.hp),
+			"The most health you can have." .. GearText(s.ghp, "+" .. FormatAzsNum(s.ghp) .. " health"))
+		AZS_Row("CharacterStatFrame2", "Damage", SignedPct(s.dmg - 1),
+			"Every spell you cast deals this much more damage. It grows with your level, gear, talents, jewelry and buffs."
+			.. GearText(s.gdmg, SignedPct(s.gdmg) .. " damage"))
+		AZS_Row("CharacterStatFrame3", "Haste", SignedPct(1 - s.cd),
+			"Your spells come back this much sooner."
+			.. GearText(s.gcd, SignedPct(s.gcd) .. " cooldown reduction"))
+		AZS_Row("CharacterStatFrame4", "Crit", UnsignedPct(s.crit),
+			"The chance a spell strikes critically. Past 100%, the rest adds to your critical damage."
+			.. GearText(s.gcrit, SignedPct(s.gcrit) .. " critical strike"))
+		AZS_Row("CharacterStatFrame5", "Crit Dmg", UnsignedPct(s.cm),
+			"A critical strike deals this much of a spell's damage."
+			.. GearText(s.gcm, SignedPct(s.gcm) .. " critical damage"))
+		AZS_Row("CharacterArmorFrame", "Armor", UnsignedPct(s.arm),
+			"Damage you take is reduced by this much (60% at most)."
+			.. storm
+			.. GearText(s.garm, SignedPct(s.garm) .. " damage reduction"))
+		AZS_Row("CharacterAttackFrame", "Area", SignedPct(s.area - 1),
+			"Your spells' areas and ranges are this much larger."
+			.. GearText(s.garea, SignedPct(s.garea) .. " area"))
+		AZS_Row("CharacterAttackPowerFrame", "Targets", string.format("+%d", tonumber(s.cnt) or 0),
+			"Every spell that picks its targets picks this many more."
+			.. GearText(s.gcnt, string.format("+%d targets", tonumber(s.gcnt) or 0)))
+		AZS_Row("CharacterDamageFrame", "Echo", UnsignedPct(s.echo),
+			"The chance a spell strikes twice. Past 100%, every spell strikes twice and the rest is the chance of a third."
+			.. GearText(s.gecho, SignedPct(s.gecho) .. " echo"))
+		AZS_Row("CharacterRangedAttackFrame", "Speed", SignedPct(s.spd - 1),
+			"You run this much faster." .. GearText(s.gspd, SignedPct(s.gspd) .. " movement speed"))
+		AZS_Row("CharacterRangedAttackPowerFrame", "Regen", FormatAzsNum(s.reg),
+			"Health you regain every second."
+			.. GearText(s.greg, "+" .. FormatAzsNum(s.greg) .. " health per second"))
+		AZS_Row("CharacterRangedDamageFrame", "Pickup", FormatAzsNum(s.pick) .. " yd",
+			"Experience and gold fly to you from this far."
+			.. GearText(s.gpick, SignedPct(s.gpick) .. " pickup range"))
+		if CharacterResistanceFrame and CharacterResistanceFrame.Hide then
+			CharacterResistanceFrame:Hide()
+		end
+		PaintMore(s)
+	end
+
+	AZS_Pct = SignedPct
+	AZS_Update = PaintMain
+	if type(stockMore) == "function" then
+		AZS_UpdateMore = function()
+			local s = AZS_STATS
+			if type(s) ~= "table" then return end
+			if StatPlaces() < 1 then
+				stockMore()
+				return
+			end
+			if not AZSMoreStats then stockMore() end
+			PaintMore(s)
+		end
+	end
+end
+
+CharDec.Refresh = function()
+	CharDec.Setup()
+	if type(AZS_Update) ~= "function" then return end
+	if CharacterFrame and CharacterFrame.IsVisible and CharacterFrame:IsVisible() then
+		AZS_Update()
+	elseif PaperDollFrame and PaperDollFrame.IsVisible and PaperDollFrame:IsVisible() then
+		AZS_Update()
+	end
+end
+
+CharDec.Setup()
+
+BuildOptions = function()
 local options = CreateFrame("Frame", "CoreComfortsOptions", UIParent)
 options:SetWidth(580)
 options:SetHeight(420)
@@ -3980,6 +4594,7 @@ local optionKeys = {
 	{ key = "counter", label = "Kills, gold, and cache" },
 	{ key = "cachecount", label = "Caches you can buy", tip = "Adds (3) after the cache price.|That number is how many caches your gold can pay for right now.|Each one costs more than the last, so 100 gold at 20 buys 3.|While this is off, the bar shows the price only." },
 	{ key = "jewelry", label = "Jewelry bar" },
+	{ key = "barcd", label = "Action bar cooldowns", tip = "Shows whole seconds left on each spell on the action bar.|Under 1s it shows one decimal place.|Turns yellow under 5s and red under 1s.|Uses the run's spell list, so haste is included.|Swapped buttons are matched by icon when the client can read it." },
 	{ header = "Statistics", col = 2 },
 	{ key = "stats", label = "Kill, XP, and gold per minute", tip = "The first number is the last 60 seconds.|Average is the pace for the whole run.|Pauses, level-up picks, and cache picks are left out." },
 	{ key = "alive", label = "Alive enemies" },
@@ -3996,8 +4611,9 @@ local optionKeys = {
 	{ header = "Other", col = 1 },
 	{ key = "nameplates", label = "Guardian and boss nameplates", tip = "Shows nameplates for guardians and bosses only.|Turn on enemy nameplates in the game options, or no plates are shown.|Other enemies are hidden while this is on.|A normal enemy with the same name as one of them still shows." },
 	{ key = "luckodds", label = "Luck and card chances", tip = "Shows your luck and the estimated chance of a Rare, Epic, or Legendary card.|It stays up before a run too, at 0% until the run begins.|Spells, rings, and trinkets share one column. Amulets are higher.|One percent is added for each level, up to 30%.|Drag the panel to move it." },
-	{ header = "Cooldown decimals", col = 1 },
-	{ slider = "decimals", label = "Decimal places", min = 0, max = 4, default = 0, tip = "Shows a spell's cooldown with more decimal places.|The number is the cooldown the game already reports." }
+	{ header = "Decimals", col = 1 },
+	{ slider = "statdecimals", label = "Stat places", min = 0, max = 4, default = 0, tip = "Decimal places on the character panel (C), Run Stats, and the luck panel.|Uses AZS_STATS.|0 leaves the game's own rounding." },
+	{ slider = "decimals", label = "Cooldown places", min = 0, max = 4, default = 0, tip = "Decimal places on spell cooldown tooltips.|Matches the spell on the button, even if you swapped action bars.|0 leaves the game's own rounding." }
 }
 
 local optionSliders = {}
@@ -4256,7 +4872,8 @@ for oi = 1, table.getn(optionKeys) do
 		valueText:SetPoint("TOPRIGHT", options, "TOPLEFT", x + 250, y)
 		valueText:SetTextColor(1, 0.82, 0)
 		local sliderName = "CoreComfortsHealthRate"
-		if entry.slider == "decimals" then sliderName = "CoreComfortsDecimals" end
+		if entry.slider == "decimals" then sliderName = "CoreComfortsDecimals"
+		elseif entry.slider == "statdecimals" then sliderName = "CoreComfortsStatDecimals" end
 		local slider = CreateFrame("Slider", sliderName, options)
 		slider:SetOrientation("HORIZONTAL")
 		slider:SetWidth(190)
@@ -4284,13 +4901,13 @@ for oi = 1, table.getn(optionKeys) do
 		local slow = options:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		slow:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", -4, 2)
 		if entry.low then slow:SetText(entry.low)
-		elseif entry.slider == "decimals" then slow:SetText("Off")
+		elseif entry.slider == "decimals" or entry.slider == "statdecimals" then slow:SetText("Off")
 		else slow:SetText("Slower") end
 		slow:SetTextColor(0.7, 0.7, 0.7)
 		local fast = options:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		fast:SetPoint("TOPRIGHT", slider, "BOTTOMRIGHT", 4, 2)
 		if entry.high then fast:SetText(entry.high)
-		elseif entry.slider == "decimals" then fast:SetText("4")
+		elseif entry.slider == "decimals" or entry.slider == "statdecimals" then fast:SetText("4")
 		else fast:SetText("Faster") end
 		fast:SetTextColor(0.7, 0.7, 0.7)
 		slider:SetScript("OnValueChanged", function()
@@ -4305,6 +4922,11 @@ for oi = 1, table.getn(optionKeys) do
 			end
 			CoreComfortsDB[this.optKey] = step
 			if this.caption then this.caption:SetText(SliderCaption(this.optKey, step)) end
+			if this.optKey == "statdecimals" then
+				local luckFrame = getglobal("CoreComfortsLuck")
+				if luckFrame and luckFrame.Update then luckFrame.Update() end
+				if CharDec.Refresh then CharDec.Refresh() end
+			end
 		end)
 		slider:EnableMouseWheel(true)
 		slider:SetScript("OnMouseWheel", function()
@@ -4486,6 +5108,7 @@ for oi = 1, table.getn(optionKeys) do
 			UpdateDebuffs()
 			UpdateMap()
 			UpdateJewelry()
+			if BarCd.Update then BarCd.Update() end
 			UpdateNameplates()
 			local luckFrame = getglobal("CoreComfortsLuck")
 			if luckFrame and luckFrame.Update then luckFrame.Update() end
@@ -4552,6 +5175,11 @@ local function BuildArmoryPanel()
 	local collect = {}
 	local editButton
 	local ToggleOwned
+	local ToggleOwnedRow
+	-- Set bonuses cover armor only; weapons stay outside row toggles.
+	local SET_SLOTS = {
+		"Head", "Shoulder", "Chest", "Waist", "Legs", "Feet", "Wrist", "Hands"
+	}
 
 	local armoryRoot = CreateFrame("Frame", nil, options)
 	armoryRoot:SetPoint("TOPLEFT", options, "TOPLEFT", 16, -64)
@@ -4897,7 +5525,11 @@ local function BuildArmoryPanel()
 		right:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 0, 0)
 		button.edges = { top, bottom, left, right }
 		button.rowIndex = ri
+		button.rarityKey = info.key
 		PaintCell(button, false)
+		button:SetScript("OnClick", function()
+			if ToggleOwnedRow then ToggleOwnedRow(this.rarityKey) end
+		end)
 		button:SetScript("OnEnter", function()
 			if not this.setBonus or not GameTooltip then return end
 			local bonus = this.setBonus
@@ -4927,6 +5559,9 @@ local function BuildArmoryPanel()
 			GameTooltip:AddLine("8 pieces at 5 stars", 0.85, 0.7, 0.3)
 			AddWrapped(bonus.five, 0, 1, 0)
 			GameTooltip:AddLine("Weapons are not part of the set.", 0.7, 0.7, 0.7)
+			if collect.editing then
+				GameTooltip:AddLine("Click to tick or clear every armor piece in this row.", 0.85, 0.7, 0.3)
+			end
 			FitTooltip(this)
 		end)
 		button:SetScript("OnLeave", function()
@@ -5277,6 +5912,35 @@ local function BuildArmoryPanel()
 		end
 	end
 
+	ToggleOwnedRow = function(rarityKey)
+		if not collect.editing or not collect.draft or not rarityKey then return end
+		local list = {}
+		local allOwned = true
+		local i
+		for i = 1, table.getn(SET_SLOTS) do
+			local button = cells[rarityKey .. "|" .. SET_SLOTS[i]]
+			if button and button.item and button.item.id then
+				tinsert(list, button)
+				if collect.draft[tostring(button.item.id)] == nil then
+					allOwned = false
+				end
+			end
+		end
+		if table.getn(list) < 1 then return end
+		local want = not allOwned
+		for i = 1, table.getn(list) do
+			local button = list[i]
+			local id = tostring(button.item.id)
+			if want then
+				collect.draft[id] = 0
+				PaintOwned(button, true)
+			else
+				collect.draft[id] = nil
+				PaintOwned(button, false)
+			end
+		end
+	end
+
 	local function PanelButton(parent, text, width)
 		local button = CreateFrame("Button", nil, parent)
 		button:SetWidth(width)
@@ -5306,7 +5970,7 @@ local function BuildArmoryPanel()
 			BeginEditing()
 		end
 	end)
-	HookTip(editButton, "Edit collection", "Click the items you already own.|A green tick marks an item you have.|Confirm saves that list for this class.|Owned items are kept as 0 star.|A drop marks the piece too, new or already owned.|Closing asks you to save, leave without saving, or cancel.")
+	HookTip(editButton, "Edit collection", "Click the items you already own.|A green tick marks an item you have.|Click a set icon to tick or clear every armor piece in that row.|Weapons stay out of the set toggle.|Confirm saves that list for this class.|Owned items are kept as 0 star.|A drop marks the piece too, new or already owned.|Closing asks you to save, leave without saving, or cancel.")
 	NoteOption(editButton, 3)
 
 	local collectBlocker = CreateFrame("Frame", nil, options)
@@ -5620,6 +6284,7 @@ SLASH_CORECOMFORTS1 = "/cc"
 SLASH_CORECOMFORTS2 = "/core"
 SLASH_CORECOMFORTS3 = "/classic"
 SlashCmdList["CORECOMFORTS"] = function(msg)
+	msg = string.lower(msg or "")
 	if msg == "reset" then
 		CoreComfortsDB.left = nil
 		CoreComfortsDB.top = nil

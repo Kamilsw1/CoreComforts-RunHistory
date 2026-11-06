@@ -4,7 +4,7 @@ Core Comforts and Run History are addons for [Azeroth Survivors](https://azeroth
 
 ## Core Comforts
 
-Boss and guardian health bars, with debuffs and an estimate of damage over time. The same estimate is drawn on the target frame. Guardian timers, and minimap pins for guardians and caches. Every option can be turned on or off. `/cc` opens the window.
+Boss and guardian health bars, with debuffs and an estimate of damage over time. The same estimate is drawn on the target frame. Guardian timers, and minimap pins for guardians and caches. The action bar shows the seconds left on each spell. Character stats can show more decimal places. Every option can be turned on or off. `/cc` opens the window.
 
 ### Direction arrows, tally, and jewelry
 
@@ -45,7 +45,7 @@ Direction arrows for a cache and a guardian. Kill count, gold, and caches. The c
 
 ### Options
 
-Each option can be turned on or off. Caches you can buy is under UI, just below kills, gold, and cache, and it starts on.
+Each option can be turned on or off. Caches you can buy is under UI, just below kills, gold, and cache, and it starts on. Action bar cooldowns starts on: whole seconds left on each spell, yellow under 5 seconds and red under 1 second. Stat places, under Decimals, sets the decimal places on the character panel. It starts at the game's own rounding.
 
 ![Core Comforts options](screenshots/options.jpg)
 
@@ -57,11 +57,11 @@ Gear from each map and boss. It updates when you get a drop. The addon cannot re
 
 ## Run History
 
-Saves each run and compares kills per minute by class, map, difficulty, and spec. `/history` opens the window.
+Saves each run and compares kills per minute by class, map, difficulty, and spec. New runs also store the date and time. `/history` opens the window. Options are in that window.
 
 ### Run list
 
-Filter by class, map, and difficulty. Switch between the full run and endless, and between the average pace and the last minute. The minimum length hides shorter runs, from 0 to 16 minutes.
+Filter by class, map, and difficulty. Switch between endless, the full run, and a mid-run snapshot, and between the average pace and the last minute. Each new run shows its date and time. The minimum length hides shorter runs, from 0 to 16 minutes.
 
 ![Run list, with class, map, and difficulty filters](screenshots/history.jpg)
 
@@ -73,7 +73,7 @@ Kills, damage, gold, and the character's stats.
 
 ### Spells, jewelry, and damage
 
-Spells, jewelry, and damage done.
+Spells, with the total upgrades for each one, and jewelry, with what the piece does while equipped. Damage done, and each ability's share of that damage.
 
 ![Spells, jewelry, and damage done](screenshots/history-build.png)
 
@@ -82,6 +82,16 @@ Spells, jewelry, and damage done.
 Damage for the last minute, damage taken, and pickups over time.
 
 ![Damage taken and pickups over time](screenshots/history-pickups.png)
+
+## What's new
+
+Core Comforts 0.3. The action bar shows how many seconds are left on each spell. It turns yellow under 5 seconds and red under 1 second. Stat places sets how many decimal places the character panel uses. It starts at the game's own rounding.
+
+Run History 0.3. Each new run stores the date and time. Options can show it as day/month or month/day, with or without the year. Details shows the total upgrades on each spell, and what each jewelry piece does while equipped. The pickup list shows the increase from that rank. Damage done includes each ability's share of the damage in that snapshot.
+
+Endless and the full run are always saved. The first install also saves snapshots at 16, 18, and 20 minutes. You can change those in Options, up to 6 marks, from 1 to 60 minutes. A mark is saved only when a new run reaches that time.
+
+Runs saved before this version stay in the list. They do not gain a date, upgrade lines, jewelry effects, or a damage share. A dash means that detail was not recorded.
 
 ## Install
 

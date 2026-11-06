@@ -1,7 +1,7 @@
--- Run History: one saved sheet when the final boss dies (Full run) and one at
--- the real end including endless (Endless). The list defaults to this class,
--- this map, and this difficulty. Kills per minute is the sort. /history toggles
--- the window.
+-- Run History: sheets for Endless (real end), Full run (final boss kill), and
+-- optional mid-run minute marks (player-chosen, default 16/18/20). The list
+-- defaults to this class, this map, and this difficulty. Kills per minute is
+-- the sort. /history toggles the window.
 
 -- One table so the file stays under Lua 5.0's 200 locals.
 local CFG = {
@@ -10,11 +10,17 @@ local CFG = {
 	MIN_TIME = 600,
 	MARK = 1200,
 	MIN_MAX = 16,
-	FRAME_W = 880,
+	FRAME_W = 940,
+	-- Mid-run wall-clock marks (minutes). Captured once when the run clock crosses each.
+	-- Live list lives in RunStatsDB.markMins; these are the first-run defaults.
+	MARK_DEFAULT = { 16, 18, 20 },
+	MARK_MAX = 6,
+	MARK_RANGE = 60,
 	ROMAN = { "I", "II", "III", "IV", "V" },
 	JEWEL_RANK = {
 		[" I"] = 1, [" II"] = 2, [" III"] = 3, [" IV"] = 4, [" V"] = 5,
 		[" VI"] = 6, [" VII"] = 7, [" VIII"] = 8, [" IX"] = 9, [" X"] = 10,
+		[" X+"] = 11, [" XI"] = 12, [" XII"] = 13,
 	},
 	CLASS_ORDER = { "warrior", "paladin", "hunter", "rogue", "priest", "shaman", "mage", "warlock", "druid" },
 	STAT_KEYS = {
@@ -72,20 +78,22 @@ local TREE_NAME = {
 	balance = "Balance", feral = "Feral",
 }
 
+-- Packed so Race sits just left of the delete/Details buttons (no dead strip).
 local COLS = {
-	{ key = "t", text = "Time", x = 8, w = 50 },
-	{ key = "class", text = "Class", x = 60, w = 74 },
-	{ key = "map", text = "Map", x = 136, w = 100 },
-	{ key = "diff", text = "Diff", x = 240, w = 72 },
-	{ key = "kpm", text = "K/min", x = 316, w = 50 },
-	{ key = "xpm", text = "XP/min", x = 368, w = 54 },
-	{ key = "gpm", text = "G/min", x = 424, w = 50 },
-	{ key = "dps", text = "DPS", x = 476, w = 58 },
-	{ key = "bosses", text = "Boss", x = 536, w = 40 },
-	{ key = "guardians", text = "Guard", x = 578, w = 46 },
-	{ key = "elites", text = "Elite", x = 626, w = 46 },
-	{ key = "lvl", text = "Lvl", x = 674, w = 32 },
-	{ key = "race", text = "Race", x = 708, w = 62 },
+	{ key = "t", text = "Time", x = 8, w = 44 },
+	{ key = "when", text = "Date", x = 54, w = 108 },
+	{ key = "class", text = "Class", x = 166, w = 64 },
+	{ key = "map", text = "Map", x = 234, w = 90 },
+	{ key = "diff", text = "Diff", x = 328, w = 62 },
+	{ key = "kpm", text = "K/min", x = 394, w = 46 },
+	{ key = "xpm", text = "XP/min", x = 444, w = 50 },
+	{ key = "gpm", text = "G/min", x = 498, w = 46 },
+	{ key = "dps", text = "DPS", x = 548, w = 52 },
+	{ key = "bosses", text = "Boss", x = 604, w = 36 },
+	{ key = "guardians", text = "Guard", x = 644, w = 42 },
+	{ key = "elites", text = "Elite", x = 690, w = 40 },
+	{ key = "lvl", text = "Lvl", x = 734, w = 28 },
+	{ key = "race", text = "Race", x = 766, w = 52 },
 }
 
 local ready = false
@@ -96,12 +104,17 @@ local anchorCache = nil
 local anchorAt = 0
 
 local frame, sub, headers, rows, foot, prevBtn, nextBtn, pageText
-local mapBtn, diffBtn, windowBtn, classBtn, diffMenu
+local mapBtn, diffBtn, classBtn, diffMenu
 local pop, popTitle, popScroll, popChild, popSlider, statBtn
 local PlaceDetails
 local PlaceWindow
 local PaintHeaders
 local SavePlace
+local NoteMarks
+local SanitizeMarkMins
+local MarkMins
+local CopyBestHits
+local MergeBestHits
 local popLines = {}
 local popBars = {}
 local popIcons = {}
@@ -112,6 +125,9 @@ local hitCursor = nil
 local hitCursorRun = nil
 local dropped = {}
 local lastOwed = 0
+-- Tables hold helpers so the chunk stays under Lua 5.0's 200 locals.
+local Window = {}
+local Options = {}
 
 local function Say(msg)
 	if DEFAULT_CHAT_FRAME then
@@ -119,15 +135,70 @@ local function Say(msg)
 	end
 end
 
-local function ResetRoundFilters()
-	-- Only min length is kept between rounds; the rest follow the new run.
-	RunStatsDB.classFilter = nil
-	RunStatsDB.mapFilter = nil
-	RunStatsDB.diff = nil
-	RunStatsDB.full = 1
-	RunStatsDB.lastMin = nil
+-- List window: "endless" | "full" | <minute number>
+Window.Mode = function()
+	local w = RunStatsDB and RunStatsDB.window
+	if type(w) == "number" then
+		local n = math.floor(w)
+		if n >= 1 and n <= CFG.MARK_RANGE then return n end
+	end
+	if w == "full" then return "full" end
+	if w == "endless" then return "endless" end
+	-- Migrate the old Full/Endless toggle.
+	if RunStatsDB and RunStatsDB.full == 1 then return "endless" end
+	if RunStatsDB and RunStatsDB.full == nil and RunStatsDB.window == nil then
+		return "endless"
+	end
+	return "endless"
+end
+
+Window.Label = function(mode)
+	mode = mode or Window.Mode()
+	if mode == "full" then return "Full run" end
+	if type(mode) == "number" then return tostring(mode) .. " minutes" end
+	return "Endless"
+end
+
+Options.ApplyDefaults = function()
+	-- Class / map: nil = follow the live run; "all" = every entry.
+	if RunStatsDB.defClass == "all" then
+		RunStatsDB.classFilter = "all"
+	else
+		RunStatsDB.classFilter = nil
+	end
+	if RunStatsDB.defMap == "all" then
+		RunStatsDB.mapFilter = "all"
+	else
+		RunStatsDB.mapFilter = nil
+	end
+	if RunStatsDB.defDiff == "any" then
+		RunStatsDB.diff = -1
+	else
+		RunStatsDB.diff = nil
+	end
+	-- Default snapshot filter is Endless or Full only (not mid-run marks).
+	if RunStatsDB.defWindow == "full" then
+		RunStatsDB.window = "full"
+	else
+		RunStatsDB.window = "endless"
+	end
+	if RunStatsDB.window == "endless" then
+		RunStatsDB.full = 1
+	elseif RunStatsDB.window == "full" then
+		RunStatsDB.full = nil
+	end
+	if RunStatsDB.defPace == "last" then
+		RunStatsDB.lastMin = 1
+	else
+		RunStatsDB.lastMin = nil
+	end
 	RunStatsDB.allClasses = nil
 	RunStatsDB.allMaps = nil
+end
+
+local function ResetRoundFilters()
+	-- Min length and Options defaults persist; live filters reset to those defaults.
+	Options.ApplyDefaults()
 end
 
 local function InitDB()
@@ -135,6 +206,30 @@ local function InitDB()
 	if not RunStatsDB.runs then RunStatsDB.runs = {} end
 	if not RunStatsDB.sort then RunStatsDB.sort = "kpm" end
 	if RunStatsDB.minTime == nil then RunStatsDB.minTime = 0 end
+	if RunStatsDB.dateFmt ~= "eu" and RunStatsDB.dateFmt ~= "us" then
+		RunStatsDB.dateFmt = "us"
+	end
+	if RunStatsDB.dateYear ~= 1 then RunStatsDB.dateYear = nil end
+	if RunStatsDB.defClass ~= "all" then RunStatsDB.defClass = "current" end
+	if RunStatsDB.defMap ~= "all" then RunStatsDB.defMap = "current" end
+	if RunStatsDB.defDiff ~= "any" then RunStatsDB.defDiff = "current" end
+	if RunStatsDB.defPace ~= "last" then RunStatsDB.defPace = "average" end
+	if RunStatsDB.defWindow == nil then
+		if RunStatsDB.full == 1 then
+			RunStatsDB.defWindow = "endless"
+		elseif RunStatsDB.full == nil then
+			RunStatsDB.defWindow = "endless"
+		else
+			RunStatsDB.defWindow = "full"
+		end
+	end
+	if RunStatsDB.defWindow ~= "endless" and RunStatsDB.defWindow ~= "full" then
+		RunStatsDB.defWindow = "endless"
+	end
+	if RunStatsDB.window == nil then
+		RunStatsDB.window = RunStatsDB.defWindow or "endless"
+	end
+	SanitizeMarkMins()
 	ResetRoundFilters()
 	if RunStatsDB.mmCorner ~= 1 then
 		RunStatsDB.mmAngle = -math.pi * 0.75
@@ -156,12 +251,108 @@ local function MinMins()
 	return n
 end
 
+-- Sorted unique mid-run mark minutes (1..60), capped at CFG.MARK_MAX.
+SanitizeMarkMins = function()
+	if not RunStatsDB then return end
+	local src = RunStatsDB.markMins
+	local out = {}
+	local seen = {}
+	if type(src) ~= "table" then
+		local i
+		for i = 1, table.getn(CFG.MARK_DEFAULT) do
+			tinsert(out, CFG.MARK_DEFAULT[i])
+		end
+		RunStatsDB.markMins = out
+		return
+	end
+	local i
+	for i = 1, table.getn(src) do
+		local n = math.floor(Num(src[i]))
+		if n >= 1 and n <= CFG.MARK_RANGE and not seen[n] then
+			seen[n] = 1
+			tinsert(out, n)
+		end
+	end
+	local a, b
+	for a = 1, table.getn(out) do
+		for b = a + 1, table.getn(out) do
+			if out[b] < out[a] then
+				local tmp = out[a]
+				out[a] = out[b]
+				out[b] = tmp
+			end
+		end
+	end
+	while table.getn(out) > CFG.MARK_MAX do
+		tremove(out)
+	end
+	RunStatsDB.markMins = out
+end
+
+MarkMins = function()
+	if not RunStatsDB then return CFG.MARK_DEFAULT end
+	if type(RunStatsDB.markMins) ~= "table" then
+		SanitizeMarkMins()
+	end
+	return RunStatsDB.markMins
+end
+
+Options.AddMarkMin = function(mins)
+	mins = math.floor(Num(mins))
+	if mins < 1 or mins > CFG.MARK_RANGE then return false end
+	SanitizeMarkMins()
+	local list = RunStatsDB.markMins
+	local i
+	for i = 1, table.getn(list) do
+		if list[i] == mins then return false end
+	end
+	if table.getn(list) >= CFG.MARK_MAX then return false end
+	tinsert(list, mins)
+	SanitizeMarkMins()
+	if Window.RebuildMenu then Window.RebuildMenu() end
+	return true
+end
+
+Options.RemoveMarkMin = function(mins)
+	mins = math.floor(Num(mins))
+	SanitizeMarkMins()
+	local list = RunStatsDB.markMins
+	local i
+	for i = table.getn(list), 1, -1 do
+		if list[i] == mins then tremove(list, i) end
+	end
+	if Window.RebuildMenu then Window.RebuildMenu() end
+	return true
+end
+
 local function MinSecs()
 	return MinMins() * 60
 end
 
 local function MinLabel()
 	return "Min " .. tostring(MinMins()) .. "m"
+end
+
+-- True when this finished run should be discarded (under Options min length).
+local function DropIfShort(rec)
+	local need = MinSecs()
+	if need <= 0 or type(rec) ~= "table" then return false end
+	local dur = Num(rec.tEnd)
+	if dur <= 0 and type(rec.atEnd) == "table" then dur = Num(rec.atEnd.t) end
+	if dur <= 0 then dur = Num(rec.liveT) end
+	if dur <= 0 and type(rec.pending) == "table" then dur = Num(rec.pending.t) end
+	if dur >= need then return false end
+	local runs = RunStatsDB and RunStatsDB.runs
+	if type(runs) == "table" then
+		local i
+		for i = table.getn(runs), 1, -1 do
+			if runs[i] == rec then tremove(runs, i) end
+		end
+	end
+	if type(rec.id) == "string" then dropped[rec.id] = 1 end
+	if pop and pop.rec == rec then pop:Hide() end
+	Say("Skipped " .. Clock(dur) .. " (under " .. tostring(MinMins()) .. " min minimum).")
+	return true
 end
 
 local function Flag(v)
@@ -415,11 +606,15 @@ local function CopyList(src, field)
 			elseif field == "talents" then
 				tinsert(out, { tree = row.tree or "", name = row.name or "", rank = Num(row.rank), key = row.key or "" })
 			elseif field == "spells" then
-				tinsert(out, { key = row.key or "", name = row.name or "", rank = Num(row.rank), icon = row.icon or "" })
+				tinsert(out, {
+					key = row.key or "", name = row.name or "", rank = Num(row.rank),
+					icon = row.icon or "", upgrades = row.upgrades or "",
+				})
 			else
 				tinsert(out, {
 					category = row.category or "", name = row.name or "",
 					key = row.key or "", rarity = row.rarity or "", icon = row.icon or "",
+					stats = row.stats or "",
 				})
 			end
 		end
@@ -541,10 +736,17 @@ local function SourceIcon(sources, key)
 	return ""
 end
 
+-- Forward-declared so SpellBarIcon can read the tip-scan icon cache.
+local SpellTips
+
 local function SpellBarIcon(key)
-	if type(key) ~= "string" or key == "" or type(AZS_SPELLS) ~= "table" or not GetActionTexture then
-		return ""
+	if type(key) ~= "string" or key == "" then return "" end
+	-- Prefer the slot→key map from the last tip scan (survives action-bar swaps).
+	if SpellTips and type(SpellTips.icons) == "table" then
+		local cached = SpellTips.icons[key]
+		if type(cached) == "string" and cached ~= "" then return cached end
 	end
+	if type(AZS_SPELLS) ~= "table" or not GetActionTexture then return "" end
 	local total = table.getn(AZS_SPELLS)
 	local i
 	for i = 1, total do
@@ -558,6 +760,458 @@ local function SpellBarIcon(key)
 		end
 	end
 	return ""
+end
+
+-- One table holds tip state + helpers so the main chunk stays under Lua 5.0's
+-- 200 locals / 32 upvalues (methods on the table do not add chunk locals).
+SpellTips = {
+	upgrades = {},
+	prev = {},
+	pendingDelta = {},
+	icons = {},
+	expectDelta = false,
+	pickDirty = false,
+	needed = true,
+	wait = 0.45,
+	age = 0,
+	every = 8,
+	frame = nil,
+	scan = nil,
+	jewelScan = nil,
+}
+
+SpellTips.Request = function(delay)
+	SpellTips.needed = true
+	if delay ~= nil then SpellTips.wait = Num(delay) else SpellTips.wait = 0.45 end
+	SpellTips.age = 0
+	if SpellTips.frame then SpellTips.frame.idle = 0 end
+end
+
+SpellTips.Clear = function()
+	local key
+	for key in pairs(SpellTips.upgrades) do
+		SpellTips.upgrades[key] = nil
+	end
+	for key in pairs(SpellTips.prev) do
+		SpellTips.prev[key] = nil
+	end
+	for key in pairs(SpellTips.pendingDelta) do
+		SpellTips.pendingDelta[key] = nil
+	end
+	for key in pairs(SpellTips.icons) do
+		SpellTips.icons[key] = nil
+	end
+	SpellTips.expectDelta = false
+	SpellTips.pickDirty = false
+	SpellTips.Request(0.45)
+end
+
+SpellTips.Apply = function(spells)
+	if type(spells) ~= "table" then return end
+	local i
+	for i = 1, table.getn(spells) do
+		local row = spells[i]
+		if type(row) == "table" and type(row.key) == "string" and row.key ~= "" then
+			local text = SpellTips.upgrades[row.key]
+			if type(text) == "string" and text ~= "" then
+				row.upgrades = text
+			end
+		end
+	end
+end
+
+-- Tip title → AZS_SPELLS.key. Never trust bar slot index: players can swap actions.
+SpellTips.KeyFromTipName = function(name)
+	if type(name) ~= "string" or name == "" then return end
+	if type(AZS_SPELLS) ~= "table" then return end
+	name = string.gsub(name, "|c%x%x%x%x%x%x%x%x", "")
+	name = string.gsub(name, "|r", "")
+	name = string.gsub(name, "%s*[Rr]ank%s*%d+%s*", " ")
+	name = string.gsub(name, "%s*%(%s*[Rr]ank%s*%d+%s*%)%s*", " ")
+	name = string.gsub(name, "^%s+", "")
+	name = string.gsub(name, "%s+$", "")
+	if name == "" then return end
+	local low = string.lower(name)
+	local i
+	for i = 1, table.getn(AZS_SPELLS) do
+		local row = AZS_SPELLS[i]
+		if type(row) == "table" and type(row.key) == "string" and row.key ~= "" then
+			if string.lower(Pretty(row.key)) == low then return row.key end
+		end
+	end
+	for i = 1, table.getn(AZS_SPELLS) do
+		local row = AZS_SPELLS[i]
+		if type(row) == "table" and type(row.key) == "string" and row.key ~= "" then
+			local pretty = string.lower(Pretty(row.key))
+			if pretty ~= "" and string.find(low, pretty, 1, true) then return row.key end
+		end
+	end
+end
+
+SpellTips.NextProbeSlot = function(slot)
+	slot = Num(slot)
+	if slot < 1 then slot = 1 end
+	while slot <= 12 do
+		if slot <= 6 or slot == 12 then
+			if not HasAction or HasAction(slot) then
+				return slot
+			end
+		end
+		slot = slot + 1
+	end
+end
+
+-- Tooltip lines can pack "Upgrades / Your bonuses / Talents" into one string
+-- with |n breaks. Keep only the upgrades clause for the history list.
+-- Tip scans often leave "|r\n|cff1eff00" from the next colored line — that
+-- used to split pickup rows (extra gap) and reset the name to white.
+SpellTips.CleanTipBit = function(text)
+	if type(text) ~= "string" or text == "" then return "" end
+	text = string.gsub(text, "\r\n", "|n")
+	text = string.gsub(text, "\n", "|n")
+	text = string.gsub(text, "\r", "|n")
+	local cut = string.find(text, "|n", 1, true)
+	if cut then text = string.sub(text, 1, cut - 1) end
+	cut = string.find(text, "Your bonuses:")
+	if cut then text = string.sub(text, 1, cut - 1) end
+	cut = string.find(text, "Talents:")
+	if cut then text = string.sub(text, 1, cut - 1) end
+	text = string.gsub(text, "|c%x%x%x%x%x%x%x%x", "")
+	text = string.gsub(text, "|r", "")
+	text = string.gsub(text, "^%s+", "")
+	text = string.gsub(text, "%s+$", "")
+	return text
+end
+
+SpellTips.ParseUpgrades = function(lines)
+	local i
+	for i = 1, table.getn(lines) do
+		local line = lines[i]
+		if type(line) == "string" then
+			local a, b, rest = string.find(line, "Upgrades:%s*(.+)")
+			if a and type(rest) == "string" then
+				rest = SpellTips.CleanTipBit(rest)
+				if rest ~= "" then return rest end
+			end
+		end
+	end
+end
+
+-- "+52% damage" minus prior "+37% damage" → "+15% damage" for that rank-up pick.
+SpellTips.DeltaUpgrades = function(before, after)
+	before = SpellTips.CleanTipBit(before or "")
+	after = SpellTips.CleanTipBit(after or "")
+	if after == "" then return "" end
+	if before == "" then return after end
+	if before == after then return "" end
+	local function Parse(s)
+		local list = {}
+		local pos = 1
+		while pos <= string.len(s) do
+			local a, b, num, name = string.find(s, "([+-]?[%d%.]+)%s*%%%s*([^,]*)", pos)
+			if not a then break end
+			name = string.gsub(name or "", "^%s+", "")
+			name = string.gsub(name, "%s+$", "")
+			tinsert(list, { num = tonumber(num) or 0, name = name })
+			pos = b + 1
+		end
+		return list
+	end
+	local aList = Parse(after)
+	local bList = Parse(before)
+	local bMap = {}
+	local i
+	for i = 1, table.getn(bList) do
+		bMap[bList[i].name] = bList[i].num
+	end
+	local bits = {}
+	for i = 1, table.getn(aList) do
+		local row = aList[i]
+		local d = row.num - (bMap[row.name] or 0)
+		if d > 0.05 then
+			tinsert(bits, string.format("+%g%% %s", d, row.name))
+		elseif d < -0.05 then
+			tinsert(bits, string.format("%g%% %s", d, row.name))
+		end
+	end
+	if table.getn(bits) == 0 then return "" end
+	local out = bits[1]
+	for i = 2, table.getn(bits) do
+		out = out .. ", " .. bits[i]
+	end
+	return out
+end
+
+SpellTips.ApplyPickDeltas = function(rec)
+	if type(rec) ~= "table" or type(rec.picks) ~= "table" then return end
+	local key, delta
+	local any = false
+	for key, delta in pairs(SpellTips.pendingDelta) do
+		any = true
+		if type(delta) == "string" and delta ~= "" then
+			local i
+			for i = table.getn(rec.picks), 1, -1 do
+				local pick = rec.picks[i]
+				if type(pick) == "table" and pick.kind == "spell" and pick.key == key then
+					if type(pick.upgrades) ~= "string" or pick.upgrades == "" then
+						pick.upgrades = delta
+					end
+					break
+				end
+			end
+		end
+		SpellTips.pendingDelta[key] = nil
+	end
+	if any then SpellTips.pickDirty = false end
+end
+
+SpellTips.Begin = function(s)
+	local slot = SpellTips.NextProbeSlot(s.slot)
+	if not slot then return end
+	s.slot = slot
+	SpellTips.scan:SetOwner(UIParent, "ANCHOR_NONE")
+	SpellTips.scan:SetAction(slot)
+	s.wait = 0
+	return true
+end
+
+SpellTips.Read = function()
+	local lines = {}
+	local n = 0
+	if SpellTips.scan.NumLines then n = SpellTips.scan:NumLines() or 0 end
+	local i
+	for i = 1, n do
+		local left = getglobal("RunHistorySpellTipTextLeft" .. i)
+		local text = left and left.GetText and left:GetText()
+		if type(text) == "string" then tinsert(lines, text) end
+	end
+	return lines
+end
+
+SpellTips.frame = CreateFrame("Frame", "RunHistorySpellTips")
+SpellTips.frame.idle = 0
+SpellTips.frame:SetScript("OnUpdate", function()
+	local phase = AZS_GetPhase and AZS_GetPhase()
+	if phase ~= "playing" and phase ~= "choosing" and phase ~= "paused" then return end
+	if type(AZS_SPELLS) ~= "table" or table.getn(AZS_SPELLS) < 1 then return end
+	local s = this.state
+	if not s then
+		SpellTips.age = SpellTips.age + arg1
+		if SpellTips.age >= SpellTips.every then
+			SpellTips.age = 0
+			SpellTips.Request(0)
+		end
+		if not SpellTips.needed then return end
+		this.idle = this.idle + arg1
+		if this.idle < SpellTips.wait then return end
+		this.idle = 0
+		if not SpellTips.scan then
+			local ok, made = pcall(CreateFrame, "GameTooltip", "RunHistorySpellTip", UIParent, "GameTooltipTemplate")
+			if not ok or not made or not made.SetAction or not made.NumLines then
+				SpellTips.wait = 5
+				return
+			end
+			SpellTips.scan = made
+		end
+		s = { slot = 1, wait = 0, byKey = {} }
+		if not SpellTips.Begin(s) then return end
+		SpellTips.needed = false
+		SpellTips.age = 0
+		this.state = s
+		return
+	end
+	s.wait = s.wait + 1
+	if s.wait < 3 then return end
+	local lines = SpellTips.Read()
+	SpellTips.scan:Hide()
+	-- Match tip title to AZS_SPELLS.key — bar order is not reliable after swaps.
+	local tipName = lines[1]
+	if (not tipName or tipName == "") and table.getn(lines) >= 2 then tipName = lines[2] end
+	local key = SpellTips.KeyFromTipName(tipName)
+	local upgrades = SpellTips.ParseUpgrades(lines)
+	if key then
+		if upgrades then s.byKey[key] = upgrades end
+		if GetActionTexture then
+			local ok, path = pcall(GetActionTexture, s.slot)
+			if ok and type(path) == "string" and path ~= "" then
+				SpellTips.icons[key] = path
+			end
+		end
+	end
+	s.slot = s.slot + 1
+	if not SpellTips.Begin(s) then
+		this.state = nil
+		local expect = SpellTips.expectDelta
+		SpellTips.expectDelta = false
+		local key
+		for key, tipText in pairs(s.byKey) do
+			local clean = SpellTips.CleanTipBit(tipText)
+			local prev = SpellTips.prev[key] or ""
+			if expect and clean ~= "" then
+				local delta = SpellTips.DeltaUpgrades(prev, clean)
+				if delta ~= "" then
+					SpellTips.pendingDelta[key] = delta
+					SpellTips.pickDirty = true
+				end
+			end
+			if clean ~= "" then
+				SpellTips.upgrades[key] = clean
+				SpellTips.prev[key] = clean
+			end
+		end
+	end
+end)
+
+SpellTips.SkipJewelLine = function(text)
+	if string.find(text, "^Binds") then return true end
+	if string.find(text, "^Unique") then return true end
+	if string.find(text, "^Requires") then return true end
+	if string.find(text, "^Finger") then return true end
+	if string.find(text, "^Neck") then return true end
+	if string.find(text, "^Trinket") then return true end
+	if string.find(text, "^Miscellaneous") then return true end
+	if string.find(text, "^Item Level") then return true end
+	if string.find(text, "Durability") then return true end
+	if string.find(text, "^Slot") then return true end
+	return false
+end
+
+SpellTips.KeepJewelLine = function(text)
+	if SpellTips.SkipJewelLine(text) then return false end
+	if string.find(text, "^Equip:") or string.find(text, "^Use:") then return true end
+	if string.find(text, "%+") then return true end
+	if string.find(text, "%%") then return true end
+	return false
+end
+
+SpellTips.JewelStats = function(slot)
+	if not GetInventoryItemLink then return "" end
+	if not SpellTips.jewelScan then
+		local ok, made = pcall(CreateFrame, "GameTooltip", "RunHistoryJewelTip", UIParent, "GameTooltipTemplate")
+		if not ok or not made or not made.SetInventoryItem or not made.NumLines then return "" end
+		SpellTips.jewelScan = made
+	end
+	SpellTips.jewelScan:SetOwner(UIParent, "ANCHOR_NONE")
+	SpellTips.jewelScan:SetInventoryItem("player", slot)
+	local parts = {}
+	local n = SpellTips.jewelScan:NumLines() or 0
+	local i
+	for i = 2, n do
+		local left = getglobal("RunHistoryJewelTipTextLeft" .. i)
+		local text = left and left.GetText and left:GetText()
+		if type(text) == "string" and text ~= "" and SpellTips.KeepJewelLine(text) then
+			text = string.gsub(text, "|n", " ")
+			text = string.gsub(text, "\n", " ")
+			tinsert(parts, text)
+		end
+	end
+	SpellTips.jewelScan:Hide()
+	if table.getn(parts) == 0 then return "" end
+	local out = parts[1]
+	for i = 2, table.getn(parts) do
+		out = out .. " · " .. parts[i]
+	end
+	return out
+end
+
+-- One tooltip "Equip:" line -> template key, first number, percent flag, short label.
+SpellTips.ItemBit = function(line)
+	if type(line) ~= "string" then return nil end
+	local text = string.gsub(line, "^%s*Equip:%s*", "")
+	text = string.gsub(text, "%.%s*$", "")
+	local a, b, num, pct = string.find(text, "(%d+%.?%d*)(%%?)")
+	if not a then return nil end
+	local key = string.gsub(text, "%d+%.?%d*", "#")
+	local low = string.lower(text)
+	local label = nil
+	if string.find(low, "critical strike") and string.find(low, "damage of") then
+		label = "crit damage"
+	elseif string.find(low, "critical strike") then
+		label = "crit chance"
+	elseif string.find(low, "cooldown") then
+		label = "cooldown"
+	elseif string.find(low, "absorb") then
+		label = "absorb"
+	elseif string.find(low, "cast twice") then
+		label = "double cast"
+	elseif string.find(low, "more targets") then
+		label = "targets"
+	elseif string.find(low, "duration") then
+		label = "duration"
+	elseif string.find(low, "area") or string.find(low, "radius") then
+		label = "area"
+	elseif string.find(low, "haste") then
+		label = "haste"
+	elseif string.find(low, "all damage") then
+		label = "all damage"
+	elseif string.find(low, "damage") then
+		label = "damage"
+	end
+	if not label then
+		label = string.sub(text, 1, 28)
+	else
+		local _, _, of = string.find(text, " of ([A-Z][%w' ]-) by ")
+		if of and not string.find(of, "^Your") then label = of .. " " .. label end
+	end
+	local neg = string.find(low, "reduces") or string.find(low, "decreases")
+	return key, tonumber(num) or 0, pct == "%", label, neg
+end
+
+SpellTips.ItemList = function(stats)
+	local list = {}
+	if type(stats) ~= "string" or stats == "" then return list end
+	local pos = 1
+	local len = string.len(stats)
+	while pos <= len + 1 do
+		local a, b = string.find(stats, " · ", pos, true)
+		local piece
+		if a then
+			piece = string.sub(stats, pos, a - 1)
+			pos = b + 1
+		else
+			piece = string.sub(stats, pos)
+			pos = len + 2
+		end
+		local key, num, pct, label, neg = SpellTips.ItemBit(piece)
+		if key then tinsert(list, { key = key, num = num, pct = pct, label = label, neg = neg }) end
+		if not a then break end
+	end
+	return list
+end
+
+-- "+84% all damage" for a first pick; later ranks show only what they added.
+SpellTips.ItemDelta = function(before, after)
+	local now = SpellTips.ItemList(after)
+	local old = SpellTips.ItemList(before)
+	local map = {}
+	local i
+	for i = 1, table.getn(old) do
+		map[old[i].key] = old[i].num
+	end
+	local out = ""
+	local shown = 0
+	for i = 1, table.getn(now) do
+		local row = now[i]
+		local d = row.num - (map[row.key] or 0)
+		if d > 0.05 or d < -0.05 then
+			if shown < 4 then
+				local sign = "+"
+				if row.neg then
+					sign = "-"
+					if d < 0 then d = -d end
+				elseif d < 0 then
+					sign = ""
+				end
+				local unit = ""
+				if row.pct then unit = "%" end
+				local bit = string.format("%s%g%s %s", sign, d, unit, row.label)
+				if out ~= "" then out = out .. ", " end
+				out = out .. bit
+				shown = shown + 1
+			end
+		end
+	end
+	return out
 end
 
 local function RacialKey()
@@ -581,7 +1235,11 @@ end
 local function JewelBase(name)
 	if type(name) ~= "string" then return "" end
 	local s = name
-	local suffixes = { " VIII", " VII", " III", " II", " IX", " IV", " VI", " V", " X", " I" }
+	-- Longer suffixes first so " X+" wins over " X", " VIII" over " V", etc.
+	local suffixes = {
+		" XII", " XI", " X+", " VIII", " VII", " III", " II",
+		" IX", " IV", " VI", " V", " X", " I",
+	}
 	local i
 	for i = 1, table.getn(suffixes) do
 		local suf = suffixes[i]
@@ -632,6 +1290,10 @@ local function LatestJewels(list)
 	local out = {}
 	local at = {}
 	if type(list) ~= "table" then return out end
+	local RARITY_RANK = {
+		Poor = 0, Common = 1, Uncommon = 2, Rare = 3,
+		Epic = 4, Legendary = 5, Artifact = 6,
+	}
 	local function Copy(piece)
 		return {
 			category = piece.category or "",
@@ -639,6 +1301,7 @@ local function LatestJewels(list)
 			key = piece.key or "",
 			rarity = piece.rarity or "",
 			icon = piece.icon or "",
+			stats = piece.stats or "",
 		}
 	end
 	local function Fill(dst, src)
@@ -654,6 +1317,9 @@ local function LatestJewels(list)
 		if (type(dst.key) ~= "string" or dst.key == "") and type(src.key) == "string" and src.key ~= "" then
 			dst.key = src.key
 		end
+		if (type(dst.stats) ~= "string" or dst.stats == "") and type(src.stats) == "string" and src.stats ~= "" then
+			dst.stats = src.stats
+		end
 	end
 	local function Rank(name)
 		local base = JewelBase(name)
@@ -661,13 +1327,20 @@ local function LatestJewels(list)
 		local suf = string.sub(name, string.len(base) + 1)
 		return CFG.JEWEL_RANK[suf] or 0
 	end
+	local function RarityRank(rarity)
+		if type(rarity) ~= "string" or rarity == "" then return -1 end
+		return RARITY_RANK[rarity] or 0
+	end
 	local function Richer(kept, piece)
 		local ra = Rank(kept.name)
 		local rb = Rank(piece.name)
 		if rb ~= ra then return rb > ra end
-		local ar = type(kept.rarity) == "string" and kept.rarity ~= ""
-		local br = type(piece.rarity) == "string" and piece.rarity ~= ""
-		if br ~= ar then return br end
+		local qa = RarityRank(kept.rarity)
+		local qb = RarityRank(piece.rarity)
+		if qb ~= qa then return qb > qa end
+		local as = type(kept.stats) == "string" and kept.stats ~= ""
+		local bs = type(piece.stats) == "string" and piece.stats ~= ""
+		if bs ~= as then return bs end
 		return false
 	end
 	local i
@@ -749,7 +1422,11 @@ local function ReadBuild(id, class)
 						local icon = SourceIcon(sources, row.sourceKey)
 						if icon == "" then icon = SpellBarIcon(key) end
 						if not IsRacial(key, name, row.slotId) then
-							tinsert(spells, { key = key, name = name, rank = rank, icon = icon })
+							local upgrades = ""
+							if type(key) == "string" and key ~= "" and type(SpellTips.upgrades[key]) == "string" then
+								upgrades = SpellTips.upgrades[key]
+							end
+							tinsert(spells, { key = key, name = name, rank = rank, icon = icon, upgrades = upgrades })
 						end
 					end
 				end
@@ -792,10 +1469,25 @@ local function ReadBuild(id, class)
 		local have = false
 		local j
 		for j = 1, table.getn(jewelry) do
-			if jewelry[j].name == piece.name then
+			local same = jewelry[j].name == piece.name
+			if not same then
+				local a = JewelBase(jewelry[j].name)
+				local b = JewelBase(piece.name)
+				same = a ~= "" and a == b
+			end
+			if same then
 				have = true
 				if (type(jewelry[j].icon) ~= "string" or jewelry[j].icon == "") and type(piece.icon) == "string" then
 					jewelry[j].icon = piece.icon
+				end
+				if type(piece.rarity) == "string" and piece.rarity ~= "" then
+					jewelry[j].rarity = piece.rarity
+				end
+				if type(piece.stats) == "string" and piece.stats ~= "" then
+					jewelry[j].stats = piece.stats
+				end
+				if type(piece.name) == "string" and piece.name ~= "" then
+					jewelry[j].name = piece.name
 				end
 			end
 		end
@@ -803,6 +1495,7 @@ local function ReadBuild(id, class)
 	end
 	ShareJewelIcons(jewelry)
 	jewelry = LatestJewels(jewelry)
+	SpellTips.Apply(spells)
 	return {
 		points = points or {},
 		armory = armory,
@@ -853,6 +1546,7 @@ ReadWorn = function()
 				key = spec.category .. tostring(spec.slot) .. ":" .. name,
 				rarity = rarity,
 				icon = icon,
+				stats = SpellTips.JewelStats(spec.slot),
 			})
 		end
 	end
@@ -966,10 +1660,13 @@ local function MakeSheet(rec, id, t)
 				end
 			end
 			if not IsRacial(key, name) then
-				tinsert(spells, { key = key, name = name, rank = Num(rank), icon = "" })
+				local upgrades = ""
+				if type(SpellTips.upgrades[key]) == "string" then upgrades = SpellTips.upgrades[key] end
+				tinsert(spells, { key = key, name = name, rank = Num(rank), icon = "", upgrades = upgrades })
 			end
 		end
 	end
+	SpellTips.Apply(spells)
 	local sheet = {
 		t = Num(t),
 		fight = Num(rec.fight),
@@ -993,6 +1690,7 @@ local function MakeSheet(rec, id, t)
 		jewelsRead = looked and 1 or nil,
 		bestHit = Num(rec.bestHit),
 		bestName = rec.bestName or "",
+		bestHits = CopyBestHits(rec.bestHits),
 	}
 	if type(rec.picks) == "table" then
 		local i
@@ -1002,7 +1700,7 @@ local function MakeSheet(rec, id, t)
 				tinsert(sheet.picks, {
 					t = Num(row.t), kind = row.kind or "", name = row.name or "",
 					rank = Num(row.rank), key = row.key or "", rarity = row.rarity or "",
-					icon = row.icon or "",
+					icon = row.icon or "", upgrades = row.upgrades or "", stats = row.stats or "",
 				})
 			end
 		end
@@ -1100,6 +1798,36 @@ local function TrackXp(rec)
 	rec.trackXpn = xpn
 end
 
+-- Wall-clock stamp for the list Date column (local PC time).
+Options.StampWhen = function(rec)
+	if type(rec) ~= "table" or not date then return end
+	local ok, text = pcall(date, "%Y-%m-%d %H:%M")
+	if ok and type(text) == "string" and text ~= "" then
+		rec.when = text
+	end
+end
+
+Options.WhenText = function(rec)
+	local w = rec and rec.when
+	if type(w) ~= "string" or w == "" then return "—" end
+	-- Stored as "2026-11-06 17:52". Display follows Options date format.
+	if string.len(w) < 16 then return w end
+	local yy = string.sub(w, 3, 4)
+	local mm = string.sub(w, 6, 7)
+	local dd = string.sub(w, 9, 10)
+	local hm = string.sub(w, 12, 16)
+	local eu = RunStatsDB and RunStatsDB.dateFmt == "eu"
+	local withYear = RunStatsDB and RunStatsDB.dateYear == 1
+	local day
+	if eu then
+		day = dd .. "/" .. mm
+	else
+		day = mm .. "/" .. dd
+	end
+	if withYear then day = day .. "/" .. yy end
+	return day .. " " .. hm
+end
+
 local function StartRun(id)
 	local rec = {
 		id = id,
@@ -1112,6 +1840,8 @@ local function StartRun(id)
 	}
 	tinsert(RunStatsDB.runs, rec)
 	FillIdentity(rec)
+	Options.StampWhen(rec)
+	SpellTips.Clear()
 	return rec
 end
 
@@ -1502,13 +2232,16 @@ local function FromPending(rec)
 				tinsert(sheet.picks, {
 					t = Num(row.t), kind = row.kind or "", name = row.name or "",
 					rank = Num(row.rank), key = row.key or "", rarity = row.rarity or "",
-					icon = row.icon or "",
+					icon = row.icon or "", upgrades = row.upgrades or "", stats = row.stats or "",
 				})
 			end
 		end
 	end
 	AttachCache(sheet, rec)
 	if Num(sheet.fight) < 1 then sheet.fight = Num(rec.fight) end
+	sheet.bestHit = Num(rec.bestHit)
+	sheet.bestName = rec.bestName or ""
+	sheet.bestHits = CopyBestHits(rec.bestHits)
 	return sheet
 end
 
@@ -1538,7 +2271,8 @@ local function ArchiveRestart(rec)
 		race = rec.race, rname = rec.rname, party = rec.party,
 		result = rec.result, tEnd = rec.tEnd, at20 = rec.at20, atEnd = rec.atEnd, atWin = rec.atWin,
 		preview = rec.preview, watched = rec.watched, told = 1,
-		bestHit = rec.bestHit, bestName = rec.bestName,
+		bestHit = rec.bestHit, bestName = rec.bestName, bestHits = CopyBestHits(rec.bestHits),
+		when = rec.when, marks = rec.marks,
 	}
 	tinsert(RunStatsDB.runs, kept)
 	rec.at20 = nil
@@ -1546,6 +2280,8 @@ local function ArchiveRestart(rec)
 	rec.atWin = nil
 	rec.tEnd = nil
 	rec.result = nil
+	rec.when = nil
+	rec.marks = nil
 	rec.xp = 0
 	rec.pending = nil
 	rec.cache = nil
@@ -1557,6 +2293,7 @@ local function ArchiveRestart(rec)
 	rec.based = nil
 	rec.bestHit = nil
 	rec.bestName = nil
+	rec.bestHits = nil
 	rec.pace = nil
 	rec.meterPace = nil
 	rec.fight = nil
@@ -1572,6 +2309,8 @@ local function ArchiveRestart(rec)
 	rec.watched = nil
 	rec.told = nil
 	rec.open = 1
+	Options.StampWhen(rec)
+	SpellTips.Clear()
 end
 
 local function KindName(kind)
@@ -1603,15 +2342,19 @@ local function TrackSpells(rec, t)
 				if not first then
 					tinsert(rec.picks, {
 						t = Num(t), kind = "spell", name = Pretty(row.key), rank = rank,
-						key = row.key, icon = SpellBarIcon(row.key),
+						key = row.key, icon = SpellBarIcon(row.key), upgrades = "",
 					})
+					SpellTips.expectDelta = true
+					SpellTips.Request(0.6)
 				end
 			elseif rank > Num(prev) then
 				rec.seenSpells[row.key] = rank
 				tinsert(rec.picks, {
 					t = Num(t), kind = "spell", name = Pretty(row.key), rank = rank,
-					key = row.key, icon = SpellBarIcon(row.key),
+					key = row.key, icon = SpellBarIcon(row.key), upgrades = "",
 				})
+				SpellTips.expectDelta = true
+				SpellTips.Request(0.6)
 			end
 		end
 	end
@@ -1661,6 +2404,11 @@ local function ApplySpellNames(rec, build)
 				if (type(pick.icon) ~= "string" or pick.icon == "") and type(src.icon) == "string" and src.icon ~= "" then
 					pick.icon = src.icon
 				end
+				if pick.kind ~= "spell" and pick.kind ~= "talent" then
+					if (type(pick.stats) ~= "string" or pick.stats == "") and type(src.stats) == "string" and src.stats ~= "" then
+						pick.stats = src.stats
+					end
+				end
 			end
 		end
 	end
@@ -1708,6 +2456,7 @@ local function NoteBuild(rec, t, silent)
 				tinsert(rec.picks, {
 					t = Num(t), kind = row.category or "gear", name = row.name or "Jewelry",
 					rank = 0, key = id, rarity = row.rarity or "", icon = row.icon or "",
+					stats = row.stats or "",
 				})
 			end
 		end
@@ -1715,6 +2464,7 @@ local function NoteBuild(rec, t, silent)
 	rec.based = 1
 	ApplySpellNames(rec, build)
 	ShareJewelIcons(rec.picks, build.jewelry)
+	SpellTips.Request(0.6)
 end
 
 local function CaptureMeter(sheet)
@@ -1791,6 +2541,72 @@ local function TakenName(source)
 	return Pretty(source)
 end
 
+CopyBestHits = function(src)
+	local out = {}
+	if type(src) ~= "table" then return out end
+	local name, amt
+	for name, amt in pairs(src) do
+		if type(name) == "string" and name ~= "" and Num(amt) > 0 then
+			out[name] = Num(amt)
+		end
+	end
+	return out
+end
+
+MergeBestHits = function(dst, src)
+	if type(dst) ~= "table" then dst = {} end
+	if type(src) ~= "table" then return dst end
+	local name, amt
+	for name, amt in pairs(src) do
+		if type(name) == "string" and name ~= "" and Num(amt) > Num(dst[name]) then
+			dst[name] = Num(amt)
+		end
+	end
+	return dst
+end
+
+-- Run id + current Snapshot filter. Used so Details only toggles closed for the
+-- same run under the same snapshot (not when the list filter changes).
+Options.DetailsKey = function(btn)
+	if type(btn) ~= "table" then return "" end
+	local id = ""
+	if btn.rec and type(btn.rec.id) == "string" then id = btn.rec.id end
+	local w = RunStatsDB and RunStatsDB.window
+	if w == nil then w = "endless" end
+	return id .. "|" .. tostring(w)
+end
+
+-- On Options so OpenBuild stays under Lua 5.0's 32-upvalue limit.
+Options.HitsList = function(map)
+	local list = {}
+	if type(map) ~= "table" then return list end
+	local name, amt
+	for name, amt in pairs(map) do
+		if type(name) == "string" and name ~= "" and Num(amt) > 0 then
+			tinsert(list, { name = name, hit = Num(amt) })
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.hit ~= b.hit then return a.hit > b.hit end
+		return a.name < b.name
+	end)
+	return list
+end
+
+Options.HitAbilityCount = function(sheet, rec)
+	local map = sheet and sheet.bestHits
+	if type(map) ~= "table" and rec then map = rec.bestHits end
+	if type(map) ~= "table" then return 0 end
+	local n = 0
+	local name, amt
+	for name, amt in pairs(map) do
+		if type(name) == "string" and name ~= "" and Num(amt) > 0 then
+			n = n + 1
+		end
+	end
+	return n
+end
+
 local function NoteHits(rec)
 	if not rec or not AZS_GetCombatTextEvents then return end
 	if hitCursorRun ~= rec.id then
@@ -1800,11 +2616,17 @@ local function NoteHits(rec)
 	local function Consider(ev)
 		if type(ev) ~= "table" or ev.kind ~= "damage" then return end
 		local amt = Num(ev.amount)
-		if amt <= Num(rec.bestHit) then return end
+		if amt <= 0 then return end
 		local name = ev.abilityName
 		if type(name) ~= "string" or name == "" then name = "Melee" end
-		rec.bestHit = amt
-		rec.bestName = name
+		if type(rec.bestHits) ~= "table" then rec.bestHits = {} end
+		if amt > Num(rec.bestHits[name]) then
+			rec.bestHits[name] = amt
+		end
+		if amt > Num(rec.bestHit) then
+			rec.bestHit = amt
+			rec.bestName = name
+		end
 	end
 	local reads = 0
 	while reads < 8 do
@@ -1827,6 +2649,9 @@ local function CloseOpen(exceptId)
 	for i = 1, table.getn(runs) do
 		local rec = runs[i]
 		if rec.open == 1 and rec.id ~= exceptId and not rec.atEnd then
+			local t = Num(rec.liveT)
+			if t <= 0 and type(rec.pending) == "table" then t = Num(rec.pending.t) end
+			NoteMarks(rec, t)
 			rec.atEnd = FromPending(rec)
 			ApplyLastMinute(rec.atEnd, rec)
 			CaptureMeter(rec.atEnd)
@@ -1839,7 +2664,12 @@ local function CloseOpen(exceptId)
 			rec.pending = nil
 			rec.pace = nil
 			rec.meterPace = nil
-			Announce(rec)
+			if DropIfShort(rec) then
+				-- discarded
+			else
+				Options.StampWhen(rec)
+				Announce(rec)
+			end
 		end
 	end
 end
@@ -1876,6 +2706,10 @@ local function Finish(rec)
 			rec.atEnd.bestName = rec.bestName
 			changed = true
 		end
+		if type(rec.bestHits) == "table" then
+			rec.atEnd.bestHits = MergeBestHits(CopyBestHits(rec.atEnd.bestHits), rec.bestHits)
+			changed = true
+		end
 		if summary and rec.atEnd.summary ~= 1 then
 			ApplySummary(rec.atEnd, summary)
 			rec.tEnd = Num(rec.atEnd.t)
@@ -1895,6 +2729,7 @@ local function Finish(rec)
 	NoteBuild(rec, t, false)
 	TrackSpells(rec, t)
 	NotePace(rec, t)
+	NoteMarks(rec, t)
 	rec.atEnd = FromPending(rec)
 	if Num(rec.atEnd.t) <= 0 then rec.atEnd.t = t end
 	local ok, sheet = pcall(MakeSheet, rec, rec.id, t)
@@ -1929,6 +2764,8 @@ local function Finish(rec)
 	if rec.result == "victory" and type(rec.atEnd) == "table" and not rec.at20 then
 		rec.at20 = rec.atEnd
 	end
+	if DropIfShort(rec) then return false end
+	Options.StampWhen(rec)
 	Announce(rec)
 	return true
 end
@@ -1942,21 +2779,74 @@ local function Duration(rec)
 	return 0
 end
 
-local function SheetFor(rec, full)
+local function SheetFor(rec, mode)
+	if mode == nil then mode = Window.Mode() end
 	if rec.open == 1 and rec.watched == 1 and type(rec.preview) == "table" then
 		return rec.preview
 	end
-	if full then
+	-- Mid-run minute marks (only present on runs that reached that clock).
+	if type(mode) == "number" then
+		if type(rec.marks) == "table" and type(rec.marks[mode]) == "table" then
+			return rec.marks[mode]
+		end
+		return nil
+	end
+	if mode == "endless" then
 		if type(rec.atEnd) == "table" then return rec.atEnd end
 		if type(rec.atWin) == "table" then return rec.atWin end
 		if rec.open ~= 1 and type(rec.pending) == "table" then return rec.pending end
 		return nil
 	end
+	-- Full run: stats up to the final boss kill.
 	if type(rec.at20) == "table" then return rec.at20 end
 	if type(rec.atWin) == "table" then return rec.atWin end
 	-- No victory sheet: the attempt itself (died or left before the final boss).
 	if type(rec.atEnd) == "table" then return rec.atEnd end
 	if rec.open ~= 1 and type(rec.pending) == "table" then return rec.pending end
+end
+
+-- Build a frozen sheet at markSec (mid-run minutes). Used for future runs only.
+Options.CaptureMark = function(rec, t, markSec)
+	if type(rec) ~= "table" then return end
+	t = Num(t)
+	markSec = Num(markSec)
+	if markSec <= 0 then return end
+	if rec.based ~= 1 then
+		NoteBuild(rec, t, true)
+	else
+		NoteBuild(rec, t, false)
+	end
+	TrackSpells(rec, t)
+	local sheet = nil
+	local ok, built = pcall(MakeSheet, rec, rec.id, markSec)
+	if ok and type(built) == "table" then sheet = built end
+	if not sheet then sheet = FromPending(rec) end
+	if type(sheet) ~= "table" then return end
+	sheet.t = markSec
+	ApplyLastMinute(sheet, rec)
+	ApplyLast10(sheet, rec)
+	AttachCache(sheet, rec)
+	CaptureMeter(sheet)
+	CaptureTaken(sheet, rec)
+	ApplyLastGraphs(sheet, rec)
+	return sheet
+end
+
+NoteMarks = function(rec, t)
+	t = Num(t)
+	if type(rec) ~= "table" then return end
+	local marks = MarkMins()
+	if table.getn(marks) <= 0 then return end
+	if t < marks[1] * 60 then return end
+	if type(rec.marks) ~= "table" then rec.marks = {} end
+	local i
+	for i = 1, table.getn(marks) do
+		local m = marks[i]
+		local sec = m * 60
+		if t >= sec and type(rec.marks[m]) ~= "table" then
+			rec.marks[m] = Options.CaptureMark(rec, t, sec)
+		end
+	end
 end
 
 local function ClassName(key, fallback)
@@ -2170,15 +3060,14 @@ local function Collect()
 	local class = ViewClass(ctx)
 	local mapFilter = ViewMap(ctx)
 	local diff = ViewDiff(ctx)
-	local full = RunStatsDB.full == 1
+	local mode = Window.Mode()
 	local list = {}
 	local runs = RunStatsDB.runs
 	local i
 	for i = 1, table.getn(runs) do
 		local rec = runs[i]
-		local sheet = SheetFor(rec, full)
-		local longEnough = Duration(rec) >= MinSecs() or rec.watched == 1
-		if rec.party ~= 1 and sheet and longEnough then
+		local sheet = SheetFor(rec, mode)
+		if rec.party ~= 1 and sheet then
 			local classOk = class == "all" or class == "" or rec.class == class or not rec.class or rec.class == ""
 			local mapOk = mapFilter == "all" or mapFilter == "" or not rec.zone or rec.zone == "" or rec.zone == mapFilter
 			local diffOk = diff < 0 or DiffLevel(rec.heroic) == diff
@@ -2199,6 +3088,15 @@ local function Collect()
 			bv = Num(b.heroic)
 			if av == bv then return a.rates.kpm > b.rates.kpm end
 			return av < bv
+		end
+		if key == "when" then
+			av = (a.rec and a.rec.when) or ""
+			bv = (b.rec and b.rec.when) or ""
+			if av == bv then return a.rates.kpm > b.rates.kpm end
+			-- Newest first. Empty stamps sink to the bottom.
+			if av == "" then return false end
+			if bv == "" then return true end
+			return av > bv
 		end
 		if key == "class" or key == "race" or key == "map" then
 			if key == "race" then
@@ -2231,9 +3129,12 @@ end
 local function TimeText(row)
 	local text = Clock(row.rates.t)
 	if row.rec.open == 1 then text = text .. " *" end
-	local full = Duration(row.rec)
-	if RunStatsDB.full ~= 1 and full > Num(row.rates.t) + 30 then
-		text = text .. " (" .. Clock(full) .. ")"
+	-- In Full run view, show endless length in parentheses when it kept going.
+	if Window.Mode() == "full" then
+		local full = Duration(row.rec)
+		if full > Num(row.rates.t) + 30 then
+			text = text .. " (" .. Clock(full) .. ")"
+		end
 	end
 	return text
 end
@@ -2408,7 +3309,7 @@ local function HidePopBars()
 	end
 end
 
-local function PopBar(i, share, r, g, b)
+local function PopBar(i, share, r, g, b, yTop)
 	local bar = popBars[i]
 	if not bar then
 		bar = popChild:CreateTexture(nil, "ARTWORK")
@@ -2420,8 +3321,10 @@ local function PopBar(i, share, r, g, b)
 	local w = Num(share) * 400
 	if w < 3 then w = 3 end
 	if w > 400 then w = 400 end
+	if yTop == nil then yTop = (i - 1) * 15 end
+	-- Classic 13px bar on a 15px row, same top as the text — reads centered.
 	bar:ClearAllPoints()
-	bar:SetPoint("TOPLEFT", popChild, "TOPLEFT", 0, -((i - 1) * 15))
+	bar:SetPoint("TOPLEFT", popChild, "TOPLEFT", 0, -yTop)
 	bar:SetWidth(w)
 	bar:SetHeight(13)
 	bar:SetVertexColor(r, g, b, 0.7)
@@ -2437,7 +3340,7 @@ local function HidePopIcons()
 	end
 end
 
-local function PopIcon(i, path)
+local function PopIcon(i, path, yTop)
 	if type(path) ~= "string" or path == "" then return end
 	local tex = popIcons[i]
 	if not tex then
@@ -2445,8 +3348,9 @@ local function PopIcon(i, path)
 		popIcons[i] = tex
 	end
 	if i > popIconN then popIconN = i end
+	if yTop == nil then yTop = (i - 1) * 15 end
 	tex:ClearAllPoints()
-	tex:SetPoint("TOPLEFT", popChild, "TOPLEFT", 0, -((i - 1) * 15))
+	tex:SetPoint("TOPLEFT", popChild, "TOPLEFT", 0, -yTop)
 	tex:SetWidth(14)
 	tex:SetHeight(14)
 	tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
@@ -2536,7 +3440,14 @@ local function OpenBuild(btn)
 		pop.keepGraph = nil
 	else
 		pop.graphLast = nil
+		-- Close only for the same run under the same Snapshot filter. Row Details
+		-- buttons are reused, so object identity is not enough after a filter change.
+		if pop:IsShown() and pop.detailsKey == Options.DetailsKey(btn) then
+			pop:Hide()
+			return
+		end
 	end
+	if Options.frame and Options.frame:IsShown() then Options.frame:Hide() end
 	local sheet = btn.sheet
 	local title = "Run details"
 	if btn.rec then
@@ -2553,25 +3464,96 @@ local function OpenBuild(btn)
 	popTitle:SetText(title)
 	pop.rec = btn.rec
 	pop.view = btn
+	pop.detailsKey = Options.DetailsKey(btn)
 	if btn.rec and btn.rec.open == 1 then ApplyLastGraphs(sheet, btn.rec) end
+	if pop.hitBtn then
+		if Options.HitAbilityCount(sheet, btn.rec) >= 2 then
+			pop.hitBtn:Show()
+		else
+			pop.hitBtn:Hide()
+		end
+	end
 	HidePopBars()
 	HidePopIcons()
 	if pop.dmgBtn then pop.dmgBtn:Hide() end
 	if pop.takenBtn then pop.takenBtn:Hide() end
 	local n = 0
-	local function Add(text, r, g, b, icon)
-		n = n + 1
-		local fs = PopLine(n)
-		local x = 2
-		if type(icon) == "string" and icon ~= "" then
-			x = 18
-			PopIcon(n, icon)
+	local y = 0
+	local lineY = {}
+	-- Back to the classic 15px rhythm (bars 13px on the same top) so Damage
+	-- matches the old look; wrap estimate still grows long jewelry tips.
+	local LINE = 15
+	local ICON_PAD = 18
+	local function PlainLen(s)
+		s = string.gsub(s, "|c%x%x%x%x%x%x%x%x", "")
+		s = string.gsub(s, "|r", "")
+		s = string.gsub(s, "|n", "")
+		return string.len(s)
+	end
+	local function RowHeight(piece, width)
+		if piece == " " then return LINE end
+		local cols = math.floor(Num(width) / 4.9)
+		if cols < 40 then cols = 40 end
+		local need = math.floor((PlainLen(piece) + cols - 1) / cols)
+		if need < 1 then need = 1 end
+		-- Multi-line jewelry tips only (short Equip: / Upgrades: rows stay on the 15px grid).
+		if need >= 2 and string.sub(piece, 1, 2) == "  " and not string.find(piece, "^%s*Upgrades:") then
+			return need * 12
 		end
-		fs:ClearAllPoints()
-		fs:SetPoint("TOPLEFT", popChild, "TOPLEFT", x, -((n - 1) * 15))
-		fs:SetWidth(x == 2 and 426 or 410)
-		fs:SetText(text)
-		fs:SetTextColor(r, g, b)
+		return need * LINE
+	end
+	-- One layout row per visual line. Tooltip |n must not share a slot with the next row.
+	local function Add(text, r, g, b, icon)
+		if type(text) ~= "string" then text = "" end
+		text = string.gsub(text, "\r\n", "|n")
+		text = string.gsub(text, "\n", "|n")
+		local first = true
+		local start = 1
+		local len = string.len(text)
+		local underIcon = type(icon) == "string" and icon ~= ""
+		if not underIcon and string.sub(text, 1, 2) == "  " then
+			underIcon = true
+		end
+		while start <= len + 1 do
+			local a, b = string.find(text, "|n", start, true)
+			local piece
+			if a then
+				piece = string.sub(text, start, a - 1)
+				start = b + 1
+			else
+				piece = string.sub(text, start)
+				start = len + 2
+			end
+			-- Skip empty |n segments and color-only residue (e.g. "|cff1eff00|r").
+			local keep = piece ~= "" or text == " "
+			if keep and piece ~= "" and text ~= " " and PlainLen(piece) == 0 then
+				keep = false
+			end
+			if keep then
+				if piece == "" then piece = " " end
+				n = n + 1
+				lineY[n] = y
+				local fs = PopLine(n)
+				local x = 2
+				local width = 426
+				if underIcon then
+					x = ICON_PAD
+					width = 430 - ICON_PAD
+				end
+				if first and type(icon) == "string" and icon ~= "" then
+					PopIcon(n, icon, y)
+				end
+				first = false
+				fs:ClearAllPoints()
+				fs:SetPoint("TOPLEFT", popChild, "TOPLEFT", x, -y)
+				fs:SetWidth(width)
+				if fs.SetJustifyV then fs:SetJustifyV("TOP") end
+				fs:SetText(piece)
+				fs:SetTextColor(r, g, b)
+				y = y + RowHeight(piece, width)
+			end
+			if not a then break end
+		end
 		return n
 	end
 	local function Head(text)
@@ -2596,6 +3578,7 @@ local function OpenBuild(btn)
 		if text ~= "" then Add(text, 1, 1, 1) end
 	end
 	local race = btn.race or ""
+	Line(Bit("Date", Options.WhenText(btn.rec), "bfc4c8"))
 	Line(
 		Bit("Time", Clock(sheet.t), "ffd24a"),
 		Bit("Level", tostring(math.floor(Num(sheet.lvl))), "f0e6d2"),
@@ -2653,16 +3636,31 @@ local function OpenBuild(btn)
 	Line(Bit("Damage dealt", EndNum(dealt), "ffb040"))
 	Line(Bit("Damage taken", EndNum(takenHit), "ff7080"))
 	Line(Bit("Gold", EndNum(sheet.gold), "ffd24a"), Bit("Caches", EndNum(sheet.chests), "9fd4ff"))
-	local hitName = sheet.bestName
-	local hitAmt = sheet.bestHit
-	if (type(hitName) ~= "string" or hitName == "") and btn.rec then
-		hitName = btn.rec.bestName
-		hitAmt = btn.rec.bestHit
-	end
-	if type(hitName) == "string" and hitName ~= "" and Num(hitAmt) > 0 then
-		Line(Bit("Highest hit", hitName .. "  " .. Comma(hitAmt), "ff6b4a"))
+	local hitsMap = sheet.bestHits
+	if type(hitsMap) ~= "table" and btn.rec then hitsMap = btn.rec.bestHits end
+	-- All-hits list when 2+ abilities; otherwise one Best-hit row in the same layout.
+	local hitList = nil
+	if RunStatsDB and RunStatsDB.allHits == 1 and Options.HitAbilityCount(sheet, btn.rec) >= 2 then
+		hitList = Options.HitsList(hitsMap)
 	else
-		Line(Bit("Highest hit", "-", "9a9078"))
+		local hitName = sheet.bestName
+		local hitAmt = sheet.bestHit
+		if (type(hitName) ~= "string" or hitName == "") and btn.rec then
+			hitName = btn.rec.bestName
+			hitAmt = btn.rec.bestHit
+		end
+		if type(hitName) == "string" and hitName ~= "" and Num(hitAmt) > 0 then
+			hitList = { { name = hitName, hit = Num(hitAmt) } }
+		end
+	end
+	Add("|cffb3a78aHighest hit|r", 1, 1, 1)
+	if type(hitList) == "table" and table.getn(hitList) > 0 then
+		local hi
+		for hi = 1, table.getn(hitList) do
+			Add("|cff7eb8e8" .. hitList[hi].name .. "|r  |cffff6b4a" .. Comma(hitList[hi].hit) .. "|r", 1, 1, 1)
+		end
+	else
+		Add("|cff9a9078-|r", 1, 1, 1)
 	end
 
 	WriteCharacter(Add, Head, sheet)
@@ -2676,6 +3674,10 @@ local function OpenBuild(btn)
 			if name ~= "" and not IsRacial(row.key, name) then
 				spellN = spellN + 1
 				Add(name .. "  " .. tostring(math.floor(Num(row.rank))), 0.85, 0.9, 1, row.icon)
+				local upgrades = SpellTips.CleanTipBit(row.upgrades)
+				if upgrades ~= "" then
+					Add("  Upgrades: " .. upgrades, 0.7, 0.78, 0.55)
+				end
 			end
 		end
 	end
@@ -2695,6 +3697,11 @@ local function OpenBuild(btn)
 					line = piece.rarity .. "    " .. line
 				end
 				Add(line, 0.8, 1, 0.75, piece.icon)
+				if type(piece.stats) == "string" and piece.stats ~= "" then
+					local stats = string.gsub(piece.stats, "|n", " · ")
+					stats = string.gsub(stats, "\n", " · ")
+					Add("  " .. stats, 0.65, 0.78, 0.6)
+				end
 			end
 		end
 	end
@@ -2712,7 +3719,9 @@ local function OpenBuild(btn)
 		if not btn then return end
 		btn:SetParent(popChild)
 		btn:ClearAllPoints()
-		btn:SetPoint("TOPLEFT", popChild, "TOPLEFT", 320, -((line - 1) * 15))
+		local yy = lineY[line]
+		if yy == nil then yy = (line - 1) * LINE end
+		btn:SetPoint("TOPLEFT", popChild, "TOPLEFT", 320, -yy)
 		if lastGraph then btn.label:SetText("Last min") else btn.label:SetText("Average") end
 		btn:Show()
 	end
@@ -2735,7 +3744,8 @@ local function OpenBuild(btn)
 			else
 				at = Add(line, 0.95, 0.92, 0.84)
 			end
-			PopBar(at, row.share, BarColor(meterN))
+			local br, bg, bb = BarColor(meterN)
+			PopBar(at, row.share, br, bg, bb, lineY[at])
 		end
 	end
 	if meterN == 0 then
@@ -2778,13 +3788,15 @@ local function OpenBuild(btn)
 				local share = Num(row.share)
 				if share <= 0 then share = Num(row.dmg) / totalHit end
 				local at = Add(TakenName(row.source) .. "    " .. Short(row.dmg) .. "    " .. Pct(share), 1, 0.75, 0.7)
-				PopBar(at, share, BarColor(i))
+				local br, bg, bb = BarColor(i)
+				PopBar(at, share, br, bg, bb, lineY[at])
 			end
 	end
 
 	Head("Pickups")
 	local pickN = 0
 	if type(sheet.picks) == "table" then
+		local itemSeen = {}
 		for i = 1, table.getn(sheet.picks) do
 			local row = sheet.picks[i]
 			local name = row.name or ""
@@ -2797,6 +3809,27 @@ local function OpenBuild(btn)
 				local extra = ""
 				if type(row.rarity) == "string" and row.rarity ~= "" then
 					extra = "    " .. row.rarity
+				end
+				local isSpell = row.kind == "spell"
+				local isItem = row.kind ~= "spell" and row.kind ~= "talent"
+				-- Neutral light gray for the +% text so it never blends with the row color.
+				if isSpell and type(row.upgrades) == "string" and row.upgrades ~= "" then
+					extra = extra .. "    |cffd2d2d2" .. SpellTips.CleanTipBit(row.upgrades) .. "|r"
+				elseif isItem and type(row.stats) == "string" and row.stats ~= "" then
+					local base = JewelBase(name)
+					if base == "" then base = name end
+					local gain = SpellTips.ItemDelta(itemSeen[base] or "", row.stats)
+					itemSeen[base] = row.stats
+					if gain ~= "" then
+						extra = extra .. "    |cffd2d2d2" .. gain .. "|r"
+					end
+				end
+				-- Spells = sky blue, items = orange, talents = soft gray-white.
+				local pr, pg, pb = 0.85, 0.85, 0.85
+				if isSpell then
+					pr, pg, pb = 0.4, 0.72, 1
+				elseif isItem then
+					pr, pg, pb = 1, 0.55, 0.2
 				end
 				local icon = row.icon or ""
 				if icon == "" and row.kind == "spell" and type(sheet.spells) == "table" then
@@ -2822,14 +3855,14 @@ local function OpenBuild(btn)
 						end
 					end
 				end
-				Add(Clock(row.t) .. "    " .. KindName(row.kind) .. "    " .. name .. rank .. extra, 0.95, 0.92, 0.84, icon)
+				Add(Clock(row.t) .. "    " .. KindName(row.kind) .. "    " .. name .. rank .. extra, pr, pg, pb, icon)
 			end
 		end
 	end
 	if pickN == 0 then Add("None recorded.", 0.7, 0.7, 0.65) end
 
 	HidePopLines(n + 1)
-	popChild:SetHeight(n * 15 + 8)
+	popChild:SetHeight(y + 8)
 	local view = 360
 	local maxScroll = popChild:GetHeight() - view
 	if maxScroll < 1 then maxScroll = 1 end
@@ -2882,15 +3915,12 @@ local function Refresh()
 	elseif ctx.zname and ctx.zname ~= "" then
 		mapLabel = ctx.zname
 	end
-	local windowLabel = "Full run"
-	if RunStatsDB.full == 1 then windowLabel = "Endless" end
 	local diff = ViewDiff(ctx)
 	sub:SetText(cname .. "  ·  " .. mapLabel .. "  ·  " .. DiffName(diff))
 	classBtn.label:SetText(Cap(cname, 14))
 	mapBtn.label:SetText(Cap(mapLabel, 14))
 	if diffBtn then diffBtn.label:SetText(DiffName(diff)) end
-	if frame and frame.minBtn then frame.minBtn.label:SetText(MinLabel()) end
-	windowBtn.label:SetText(windowLabel)
+	Window.btn.label:SetText(Window.Label())
 	if frame.paceBtn then
 		if RunStatsDB.lastMin == 1 then
 			frame.paceBtn.label:SetText("Last min")
@@ -2916,10 +3946,12 @@ local function Refresh()
 				local text
 				if col.key == "t" then
 					text = TimeText(item)
+				elseif col.key == "when" then
+					text = Options.WhenText(item.rec)
 				elseif col.key == "class" then
-					text = Cap(item.className or "", 12)
+					text = Cap(item.className or "", 11)
 				elseif col.key == "map" then
-					text = Cap(item.mapName or "", 16)
+					text = Cap(item.mapName or "", 15)
 				elseif col.key == "diff" then
 					text = item.diffName or ""
 				elseif col.key == "race" then
@@ -2946,6 +3978,8 @@ local function Refresh()
 					else
 						cell:SetTextColor(0.96, 0.93, 0.84)
 					end
+				elseif col.key == "when" then
+					cell:SetTextColor(0.75, 0.78, 0.82)
 				else
 					cell:SetTextColor(0.96, 0.93, 0.84)
 				end
@@ -2967,12 +4001,7 @@ local function Refresh()
 	end
 	local n = table.getn(list)
 	if n == 0 then
-		local need = MinSecs()
-		if need <= 0 then
-			foot:SetText("No runs for this filter. Party runs stay hidden.")
-		else
-			foot:SetText("No runs of " .. tostring(math.floor(need / 60)) .. " minutes or more for this filter. Party runs stay hidden.")
-		end
+		foot:SetText("No runs for this filter. Party runs stay hidden.")
 		pageText:SetText("")
 	else
 		local last = start + CFG.PAGE
@@ -2983,12 +4012,12 @@ local function Refresh()
 	PaintHeaders()
 end
 
-local ToggleDiffMenu, ToggleMinMenu, ToggleClassMenu, ToggleMapMenu
+local ToggleDiffMenu, ToggleClassMenu, ToggleMapMenu
 
 local function HideDiffMenu()
 	if diffMenu then diffMenu:Hide() end
+	if Window.menu then Window.menu:Hide() end
 	if frame then
-		if frame.minMenu then frame.minMenu:Hide() end
 		if frame.classMenu then frame.classMenu:Hide() end
 		if frame.mapMenu then frame.mapMenu:Hide() end
 	end
@@ -3002,10 +4031,12 @@ local function Toggle()
 		HideDiffMenu()
 		if pop then pop:Hide() end
 		if ask then ask:Hide() end
+		if Options.frame then Options.frame:Hide() end
 		if AZS_SetOnTopOfScreens then
 			pcall(AZS_SetOnTopOfScreens, frame, false)
 			pcall(AZS_SetOnTopOfScreens, "RunStatsTalents", false)
 			pcall(AZS_SetOnTopOfScreens, "RunStatsConfirm", false)
+			pcall(AZS_SetOnTopOfScreens, "RunStatsOptions", false)
 		end
 	else
 		HideDiffMenu()
@@ -3025,6 +4056,7 @@ local function Toggle()
 			pcall(AZS_SetOnTopOfScreens, frame, true)
 			pcall(AZS_SetOnTopOfScreens, "RunStatsTalents", true)
 			pcall(AZS_SetOnTopOfScreens, "RunStatsConfirm", true)
+			pcall(AZS_SetOnTopOfScreens, "RunStatsOptions", true)
 			pcall(AZS_SetOnTopOfScreens, "GameTooltip", true)
 		end
 		PlaceWindow()
@@ -3079,6 +4111,7 @@ end
 
 ToggleDiffMenu = function()
 	if not diffBtn then return end
+	if Window.menu then Window.menu:Hide() end
 	if not diffMenu then
 		diffMenu = CreateFrame("Frame", "RunStatsDiffMenu", UIParent)
 		diffMenu:SetWidth(114)
@@ -3119,79 +4152,104 @@ ToggleDiffMenu = function()
 	diffMenu:Raise()
 end
 
-ToggleMinMenu = function()
-	if not frame or not frame.minBtn then return end
-	if not frame.minMenu then
-		local menu = CreateFrame("Frame", "RunStatsMinMenu", UIParent)
-		menu:SetWidth(180)
-		menu:SetHeight(54)
-		menu:SetFrameStrata("TOOLTIP")
-		menu:SetBackdrop({
+Window.RebuildMenu = function()
+	if Window.menu then Window.menu:Hide() end
+	Window.menuDirty = 1
+end
+
+Window.ToggleMenu = function()
+	if not Window.btn then return end
+	if diffMenu then diffMenu:Hide() end
+	if frame then
+		if frame.classMenu then frame.classMenu:Hide() end
+		if frame.mapMenu then frame.mapMenu:Hide() end
+	end
+	if Window.menu and Window.menu:IsShown() then
+		Window.menu:Hide()
+		return
+	end
+	local choices = {
+		{ key = "endless", label = "Endless", tip = "Whole session, including endless after the win." },
+		{ key = "full", label = "Full run", tip = "Stats up to when the final boss died." },
+	}
+	local marks = MarkMins()
+	local mi
+	for mi = 1, table.getn(marks) do
+		local m = marks[mi]
+		tinsert(choices, {
+			key = m,
+			label = tostring(m) .. " minutes",
+			tip = "State at " .. tostring(m) .. ":00. Captured on new runs that reach this clock.",
+		})
+	end
+	if not Window.menu then
+		Window.menu = CreateFrame("Frame", "RunStatsWindowMenu", UIParent)
+		Window.menu:SetWidth(122)
+		Window.menu:SetFrameStrata("TOOLTIP")
+		Window.menu:SetBackdrop({
 			bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
 			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
 			tile = true, tileSize = 8, edgeSize = 8,
 			insets = { left = 2, right = 2, top = 2, bottom = 2 },
 		})
-		menu:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
-		menu:SetBackdropBorderColor(0.9, 0.75, 0.25, 0.95)
-		menu:EnableMouse(true)
-		menu:Hide()
-		frame.minMenu = menu
-		local title = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		title:SetPoint("TOP", menu, "TOP", 0, -6)
-		title:SetTextColor(0.9, 0.85, 0.7)
-		menu.title = title
-		local slider = CreateFrame("Slider", "RunStatsMinSlider", menu)
-		slider:SetPoint("TOPLEFT", menu, "TOPLEFT", 14, -24)
-		slider:SetPoint("TOPRIGHT", menu, "TOPRIGHT", -14, -24)
-		slider:SetHeight(16)
-		slider:SetOrientation("HORIZONTAL")
-		slider:SetMinMaxValues(0, CFG.MIN_MAX)
-		if slider.SetValueStep then slider:SetValueStep(1) end
-		slider:SetValue(MinMins())
-		slider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
-		local track = slider:CreateTexture(nil, "BACKGROUND")
-		track:SetTexture("Interface\\Buttons\\UI-SliderBar-Background")
-		track:SetAllPoints(slider)
-		local low = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		low:SetPoint("BOTTOMLEFT", menu, "BOTTOMLEFT", 10, 6)
-		low:SetText("0")
-		low:SetTextColor(0.7, 0.65, 0.5)
-		local high = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		high:SetPoint("BOTTOMRIGHT", menu, "BOTTOMRIGHT", -10, 6)
-		high:SetText(tostring(CFG.MIN_MAX))
-		high:SetTextColor(0.7, 0.65, 0.5)
-		frame.minSlider = slider
-		slider:SetScript("OnValueChanged", function()
-			if this.busy then return end
-			local mins = math.floor(this:GetValue() + 0.5)
-			if mins < 0 then mins = 0 end
-			if mins > CFG.MIN_MAX then mins = CFG.MIN_MAX end
-			RunStatsDB.minTime = mins * 60
-			if frame.minMenu and frame.minMenu.title then
-				frame.minMenu.title:SetText("Minimum: " .. tostring(mins) .. " min")
+		Window.menu:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+		Window.menu:SetBackdropBorderColor(0.9, 0.75, 0.25, 0.95)
+		Window.menu:EnableMouse(true)
+		Window.menu:Hide()
+		Window.menu.buttons = {}
+	end
+	-- Grow a button pool; hide extras when the mark list shrinks.
+	local need = table.getn(choices)
+	local have = table.getn(Window.menu.buttons)
+	local i
+	for i = have + 1, need do
+		local b = MakeButton(Window.menu, 112, 18)
+		b:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+			if not GameTooltip or not this.tip then return end
+			GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+			GameTooltip:SetText("Snapshot", 1, 0.82, 0)
+			GameTooltip:AddLine(this.tip, 1, 1, 1, 1)
+			GameTooltip:Show()
+		end)
+		b:SetScript("OnLeave", function()
+			this:SetBackdropBorderColor(0.55, 0.45, 0.2, 0.9)
+			HideTip()
+		end)
+		b:SetScript("OnClick", function()
+			RunStatsDB.window = this.window
+			if this.window == "endless" then
+				RunStatsDB.full = 1
+			elseif this.window == "full" then
+				RunStatsDB.full = nil
 			end
-			if frame.minBtn then frame.minBtn.label:SetText(MinLabel()) end
+			HideDiffMenu()
 			page = 1
 			Refresh()
 		end)
+		tinsert(Window.menu.buttons, b)
 	end
-	local menu = frame.minMenu
-	if menu:IsShown() then
-		HideDiffMenu()
-		return
+	for i = 1, table.getn(Window.menu.buttons) do
+		local b = Window.menu.buttons[i]
+		local choice = choices[i]
+		if choice then
+			b:ClearAllPoints()
+			b:SetPoint("TOPLEFT", Window.menu, "TOPLEFT", 5, -4 - (i - 1) * 20)
+			b.window = choice.key
+			b.label:SetText(choice.label)
+			b.tip = choice.tip
+			b:SetBackdropBorderColor(0.55, 0.45, 0.2, 0.9)
+			b:Show()
+		else
+			b:Hide()
+		end
 	end
-	HideDiffMenu()
-	if frame.minSlider then
-		frame.minSlider.busy = 1
-		frame.minSlider:SetValue(MinMins())
-		frame.minSlider.busy = nil
-	end
-	menu.title:SetText("Minimum: " .. tostring(MinMins()) .. " min")
-	menu:ClearAllPoints()
-	menu:SetPoint("TOPLEFT", frame.minBtn, "BOTTOMLEFT", 0, -2)
-	menu:Show()
-	menu:Raise()
+	Window.menu:SetHeight(need * 20 + 8)
+	Window.menuDirty = nil
+	Window.menu:ClearAllPoints()
+	Window.menu:SetPoint("TOPLEFT", Window.btn, "BOTTOMLEFT", 0, -2)
+	Window.menu:Show()
+	Window.menu:Raise()
 end
 
 do
@@ -3284,9 +4342,15 @@ do
 end
 
 PlaceDetails = function()
-	if not pop or not frame then return end
-	pop:ClearAllPoints()
-	pop:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+	if not frame then return end
+	if pop then
+		pop:ClearAllPoints()
+		pop:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+	end
+	if Options.frame and Options.frame:IsShown() then
+		Options.frame:ClearAllPoints()
+		Options.frame:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+	end
 end
 
 PlaceWindow = function()
@@ -3452,21 +4516,16 @@ local function BuildFilters()
 		"Or pick Normal through Heroic V.",
 		"Default is the difficulty of your current run.")
 
-	windowBtn = MakeButton(frame, 100, 20)
-	windowBtn:SetPoint("LEFT", diffBtn, "RIGHT", 6, 0)
-	windowBtn:SetScript("OnClick", function()
-		HideDiffMenu()
-		if RunStatsDB.full == 1 then RunStatsDB.full = nil else RunStatsDB.full = 1 end
-		page = 1
-		Refresh()
-	end)
-	Tip(windowBtn, "Full run / Endless",
-		"Full run: stats up to when the final boss died.",
-		"Endless: the whole session, including play after the win.",
-		"Default is Endless.")
+	Window.btn = MakeButton(frame, 108, 20)
+	Window.btn:SetPoint("LEFT", diffBtn, "RIGHT", 6, 0)
+	Window.btn:SetScript("OnClick", function() Window.ToggleMenu() end)
+	Tip(Window.btn, "Snapshot",
+		"Endless: whole session, including after the win.",
+		"Full run: stats up to the final boss kill.",
+		"Minute marks: state at that run clock (set in Options; new runs only).")
 
 	local paceBtn = MakeButton(frame, 84, 20)
-	paceBtn:SetPoint("LEFT", windowBtn, "RIGHT", 6, 0)
+	paceBtn:SetPoint("LEFT", Window.btn, "RIGHT", 6, 0)
 	paceBtn.label:SetText("Average")
 	frame.paceBtn = paceBtn
 	paceBtn:SetScript("OnClick", function()
@@ -3492,16 +4551,6 @@ local function BuildFilters()
 		"Save a snapshot of the run you are in right now.",
 		"It appears in the list (even under the min time) and opens Details.",
 		"Use it mid-run to check pace, meter, and build.")
-
-	local minBtn = MakeButton(frame, 72, 20)
-	minBtn:SetPoint("RIGHT", liveBtn, "LEFT", -6, 0)
-	minBtn.label:SetText(MinLabel())
-	frame.minBtn = minBtn
-	minBtn:SetScript("OnClick", function() ToggleMinMenu() end)
-	Tip(minBtn, "Minimum run length",
-		"Only show runs at least this many minutes long.",
-		"0 minutes = show every run. Drag up to 16.",
-		"This setting is kept between runs.")
 end
 
 local function BuildRows()
@@ -3573,6 +4622,512 @@ local function BuildRows()
 	end
 end
 
+-- Mid-run marks under min save length only stay if the finished run clears the minimum.
+Options.MarkConflict = function()
+	local need = MinMins()
+	if need <= 0 then return nil end
+	local marks = MarkMins()
+	local bad = {}
+	local i
+	for i = 1, table.getn(marks) do
+		if marks[i] < need then tinsert(bad, marks[i]) end
+	end
+	if table.getn(bad) <= 0 then return nil end
+	local list = tostring(bad[1]) .. "m"
+	for i = 2, table.getn(bad) do
+		list = list .. ", " .. tostring(bad[i]) .. "m"
+	end
+	local verb = "is"
+	if table.getn(bad) > 1 then verb = "are" end
+	return "Warning: " .. list .. " " .. verb .. " under the " .. tostring(need)
+		.. " min save length — those marks are discarded with short runs."
+end
+
+Options.PaintMarkWarn = function()
+	if not Options.frame or not Options.frame.markWarn then return end
+	local msg = Options.MarkConflict()
+	if msg then
+		Options.frame.markWarn:SetText(msg)
+		Options.frame.markWarn:Show()
+	else
+		Options.frame.markWarn:Hide()
+	end
+end
+
+Options.PaintMarks = function()
+	if not Options.frame then return end
+	local chips = Options.frame.markChips
+	if type(chips) ~= "table" then return end
+	local marks = MarkMins()
+	local i
+	for i = 1, table.getn(chips) do
+		local b = chips[i]
+		local m = marks[i]
+		if m then
+			b.markMin = m
+			b.label:SetText(tostring(m) .. "m")
+			b:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+			b.label:SetTextColor(1, 0.92, 0.55)
+			b:Show()
+		else
+			b.markMin = nil
+			b:Hide()
+		end
+	end
+	if Options.frame.markEmpty then
+		if table.getn(marks) <= 0 then
+			Options.frame.markEmpty:SetText("No mid-run marks (Endless and Full still save).")
+			Options.frame.markEmpty:Show()
+		else
+			Options.frame.markEmpty:Hide()
+		end
+	end
+	if Options.frame.markAddLabel then
+		Options.frame.markAddLabel:SetText(
+			"Add mark (" .. tostring(table.getn(marks)) .. "/" .. tostring(CFG.MARK_MAX) .. "):"
+		)
+	end
+	Options.PaintMarkWarn()
+end
+
+Options.Build = function()
+	Options.frame = CreateFrame("Frame", "RunStatsOptions", UIParent)
+	Options.frame:SetWidth(420)
+	Options.frame:SetHeight(548)
+	-- DIALOG like Details so GameTooltip (TOOLTIP strata) can sit above this panel.
+	Options.frame:SetFrameStrata("DIALOG")
+	if Options.frame.SetFrameLevel then Options.frame:SetFrameLevel(20) end
+	Options.frame:SetBackdrop({
+		bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true, tileSize = 16, edgeSize = 12,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	})
+	Options.frame:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+	Options.frame:SetBackdropBorderColor(0.9, 0.75, 0.25, 0.95)
+	Options.frame:EnableMouse(true)
+	Options.frame:Hide()
+	Options.frame.groups = {}
+	if UISpecialFrames then tinsert(UISpecialFrames, "RunStatsOptions") end
+
+	local title = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	title:SetPoint("TOP", Options.frame, "TOP", 0, -10)
+	title:SetText("Run History Options")
+
+	local close = MakeButton(Options.frame, 52, 18)
+	close:SetPoint("TOPRIGHT", Options.frame, "TOPRIGHT", -8, -8)
+	close.label:SetText("Close")
+	close:SetScript("OnClick", function() Options.frame:Hide() end)
+
+	local function Tip(btn, title, a, b, c)
+		btn:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+			if not GameTooltip then return end
+			GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+			if GameTooltip.SetFrameStrata then GameTooltip:SetFrameStrata("TOOLTIP") end
+			if GameTooltip.SetFrameLevel then GameTooltip:SetFrameLevel(250) end
+			if AZS_SetOnTopOfScreens then pcall(AZS_SetOnTopOfScreens, "GameTooltip", true) end
+			GameTooltip:SetText(title, 1, 0.82, 0)
+			if a then GameTooltip:AddLine(a, 1, 1, 1, 1) end
+			if b then GameTooltip:AddLine(b, 0.9, 0.9, 0.85, 1) end
+			if c then GameTooltip:AddLine(c, 0.9, 0.9, 0.85, 1) end
+			GameTooltip:Show()
+		end)
+		btn:SetScript("OnLeave", function()
+			HideTip()
+			Options.Paint()
+		end)
+	end
+
+	local function Section(text, y)
+		local fs = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		fs:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, y)
+		fs:SetTextColor(1, 0.82, 0)
+		fs:SetText(text)
+		return fs
+	end
+
+	local function AddChoice(groupKey, x, y, w, label, value, apply, tipTitle, tipA, tipB, tipC)
+		local b = MakeButton(Options.frame, w, 18)
+		b:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", x, y)
+		b.label:SetText(label)
+		b.group = groupKey
+		b.value = value
+		b:SetScript("OnClick", function()
+			apply(this.value)
+			Options.Paint()
+			page = 1
+			anchorCache = nil
+			Refresh()
+		end)
+		if tipTitle then Tip(b, tipTitle, tipA, tipB, tipC) end
+		if not Options.frame.groups[groupKey] then Options.frame.groups[groupKey] = {} end
+		tinsert(Options.frame.groups[groupKey], b)
+		return b
+	end
+
+	Section("Date format", -36)
+	AddChoice("dateFmt", 14, -56, 100, "EU  DD/MM", "eu", function(v) RunStatsDB.dateFmt = v end,
+		"EU date", "Day first: 06/11 17:52", "Used in the list Date column and Details.")
+	AddChoice("dateFmt", 120, -56, 100, "US  MM/DD", "us", function(v) RunStatsDB.dateFmt = v end,
+		"US date", "Month first: 11/06 17:52", "Used in the list Date column and Details.")
+	AddChoice("dateYear", 14, -80, 100, "No year", 0, function() RunStatsDB.dateYear = nil end,
+		"Hide year", "Shorter stamp: 06/11 17:52", "Best when comparing runs from the same year.")
+	AddChoice("dateYear", 120, -80, 100, "With year", 1, function() RunStatsDB.dateYear = 1 end,
+		"Show year", "Adds a 2-digit year: 06/11/26 17:52", "Useful if you keep history across years.")
+
+	Section("Snapshots to capture", -110)
+	local markNote = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	markNote:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -128)
+	markNote:SetTextColor(0.7, 0.65, 0.5)
+	markNote:SetWidth(390)
+	markNote:SetJustifyH("LEFT")
+	markNote:SetText("Endless and Full are always saved. Mid-run marks only on new runs that reach that clock. Click a chip to remove.")
+
+	Options.frame.markEmpty = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	Options.frame.markEmpty:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -166)
+	Options.frame.markEmpty:SetTextColor(0.7, 0.65, 0.5)
+	Options.frame.markEmpty:Hide()
+
+	Options.frame.markChips = {}
+	do
+		local ci
+		for ci = 1, CFG.MARK_MAX do
+			local b = MakeButton(Options.frame, 48, 18)
+			b:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14 + (ci - 1) * 54, -166)
+			b:Hide()
+			b:SetScript("OnClick", function()
+				if not this.markMin then return end
+				Options.RemoveMarkMin(this.markMin)
+				Options.PaintMarks()
+				Options.Paint()
+			end)
+			b:SetScript("OnEnter", function()
+				if not this.markMin then return end
+				this:SetBackdropBorderColor(1, 0.6, 0.3, 1)
+				if not GameTooltip then return end
+				GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+				if GameTooltip.SetFrameStrata then GameTooltip:SetFrameStrata("TOOLTIP") end
+				if GameTooltip.SetFrameLevel then GameTooltip:SetFrameLevel(250) end
+				if AZS_SetOnTopOfScreens then pcall(AZS_SetOnTopOfScreens, "GameTooltip", true) end
+				GameTooltip:SetText("Remove " .. tostring(this.markMin) .. "m mark", 1, 0.82, 0)
+				GameTooltip:AddLine("Stops capturing this mark on new runs.", 1, 1, 1, 1)
+				GameTooltip:AddLine("Already-saved marks on old runs stay in History.", 0.9, 0.9, 0.85, 1)
+				GameTooltip:Show()
+			end)
+			b:SetScript("OnLeave", function()
+				HideTip()
+				if this.markMin then
+					this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+				end
+			end)
+			tinsert(Options.frame.markChips, b)
+		end
+	end
+
+	Options.frame.markAddLabel = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	Options.frame.markAddLabel:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -192)
+	Options.frame.markAddLabel:SetTextColor(0.85, 0.8, 0.65)
+
+	local markSlider = CreateFrame("Slider", "RunStatsMarkSlider", Options.frame)
+	markSlider:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -212)
+	markSlider:SetWidth(280)
+	markSlider:SetHeight(16)
+	markSlider:SetOrientation("HORIZONTAL")
+	markSlider:SetMinMaxValues(1, CFG.MARK_RANGE)
+	if markSlider.SetValueStep then markSlider:SetValueStep(1) end
+	markSlider:SetValue(10)
+	markSlider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+	local markTrack = markSlider:CreateTexture(nil, "BACKGROUND")
+	markTrack:SetTexture("Interface\\Buttons\\UI-SliderBar-Background")
+	markTrack:SetAllPoints(markSlider)
+	local markLow = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	markLow:SetPoint("TOPLEFT", markSlider, "BOTTOMLEFT", 0, -2)
+	markLow:SetText("1")
+	markLow:SetTextColor(0.7, 0.65, 0.5)
+	local markHigh = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	markHigh:SetPoint("TOPRIGHT", markSlider, "BOTTOMRIGHT", 0, -2)
+	markHigh:SetText(tostring(CFG.MARK_RANGE) .. " min")
+	markHigh:SetTextColor(0.7, 0.65, 0.5)
+	Options.frame.markSlider = markSlider
+	Options.frame.markValue = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	Options.frame.markValue:SetPoint("LEFT", Options.frame.markAddLabel, "RIGHT", 6, 0)
+	Options.frame.markValue:SetTextColor(0.96, 0.93, 0.84)
+	Options.frame.markValue:SetText("10m")
+	markSlider:SetScript("OnValueChanged", function()
+		if this.busy then return end
+		local mins = math.floor(this:GetValue() + 0.5)
+		if mins < 1 then mins = 1 end
+		if mins > CFG.MARK_RANGE then mins = CFG.MARK_RANGE end
+		if Options.frame.markValue then
+			Options.frame.markValue:SetText(tostring(mins) .. "m")
+		end
+	end)
+
+	local addMark = MakeButton(Options.frame, 52, 18)
+	addMark:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 306, -210)
+	addMark.label:SetText("Add")
+	addMark:SetScript("OnClick", function()
+		local mins = 10
+		if Options.frame.markSlider then
+			mins = math.floor(Options.frame.markSlider:GetValue() + 0.5)
+		end
+		if not Options.AddMarkMin(mins) then
+			-- Cap, duplicate, or out of range: tip explains on hover.
+			return
+		end
+		Options.PaintMarks()
+		Options.Paint()
+	end)
+	addMark:SetScript("OnEnter", function()
+		this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+		if not GameTooltip then return end
+		GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+		if GameTooltip.SetFrameStrata then GameTooltip:SetFrameStrata("TOOLTIP") end
+		if GameTooltip.SetFrameLevel then GameTooltip:SetFrameLevel(250) end
+		if AZS_SetOnTopOfScreens then pcall(AZS_SetOnTopOfScreens, "GameTooltip", true) end
+		GameTooltip:SetText("Add mid-run snapshot", 1, 0.82, 0)
+		GameTooltip:AddLine("Capture the run state when the clock hits this minute.", 1, 1, 1, 1)
+		GameTooltip:AddLine("At most " .. tostring(CFG.MARK_MAX) .. " mid-run snapshots.", 0.9, 0.9, 0.85, 1)
+		GameTooltip:AddLine("Duplicates are ignored.", 0.9, 0.9, 0.85, 1)
+		GameTooltip:Show()
+	end)
+	addMark:SetScript("OnLeave", function()
+		HideTip()
+		Options.Paint()
+	end)
+
+	Options.frame.markWarn = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	Options.frame.markWarn:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -236)
+	Options.frame.markWarn:SetWidth(390)
+	Options.frame.markWarn:SetJustifyH("LEFT")
+	Options.frame.markWarn:SetTextColor(1, 0.55, 0.35)
+	Options.frame.markWarn:Hide()
+
+	Section("Minimum save length", -268)
+	Options.frame.minLabel = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	Options.frame.minLabel:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -288)
+	Options.frame.minLabel:SetTextColor(0.9, 0.85, 0.7)
+
+	local slider = CreateFrame("Slider", "RunStatsMinSlider", Options.frame)
+	slider:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -310)
+	slider:SetWidth(360)
+	slider:SetHeight(16)
+	slider:SetOrientation("HORIZONTAL")
+	slider:SetMinMaxValues(0, CFG.MIN_MAX)
+	if slider.SetValueStep then slider:SetValueStep(1) end
+	slider:SetValue(MinMins())
+	slider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+	local track = slider:CreateTexture(nil, "BACKGROUND")
+	track:SetTexture("Interface\\Buttons\\UI-SliderBar-Background")
+	track:SetAllPoints(slider)
+	local low = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	low:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 0, -2)
+	low:SetText("0")
+	low:SetTextColor(0.7, 0.65, 0.5)
+	local high = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	high:SetPoint("TOPRIGHT", slider, "BOTTOMRIGHT", 0, -2)
+	high:SetText(tostring(CFG.MIN_MAX) .. " min")
+	high:SetTextColor(0.7, 0.65, 0.5)
+	Options.frame.minSlider = slider
+	slider:SetScript("OnEnter", function()
+		if not GameTooltip then return end
+		GameTooltip:SetOwner(this, "ANCHOR_TOP")
+		if GameTooltip.SetFrameStrata then GameTooltip:SetFrameStrata("TOOLTIP") end
+		if GameTooltip.SetFrameLevel then GameTooltip:SetFrameLevel(250) end
+		if AZS_SetOnTopOfScreens then pcall(AZS_SetOnTopOfScreens, "GameTooltip", true) end
+		GameTooltip:SetText("Minimum save length", 1, 0.82, 0)
+		GameTooltip:AddLine("Do not save runs shorter than this.", 1, 1, 1, 1)
+		GameTooltip:AddLine("At the end of a short run it is discarded, not kept in history.", 0.9, 0.9, 0.85, 1)
+		GameTooltip:AddLine("0 = save every run. Already-saved runs are not removed.", 0.9, 0.9, 0.85, 1)
+		GameTooltip:Show()
+	end)
+	slider:SetScript("OnLeave", function() HideTip() end)
+	slider:SetScript("OnValueChanged", function()
+		if this.busy then return end
+		local mins = math.floor(this:GetValue() + 0.5)
+		if mins < 0 then mins = 0 end
+		if mins > CFG.MIN_MAX then mins = CFG.MIN_MAX end
+		RunStatsDB.minTime = mins * 60
+		if Options.frame.minLabel then
+			if mins <= 0 then
+				Options.frame.minLabel:SetText("Save every finished run (0 = no minimum).")
+			else
+				Options.frame.minLabel:SetText("Do not save runs shorter than " .. tostring(mins) .. " minutes.")
+			end
+		end
+		Options.PaintMarkWarn()
+		page = 1
+		Refresh()
+	end)
+
+	Section("Default filters", -348)
+	local note = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	note:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -366)
+	note:SetTextColor(0.7, 0.65, 0.5)
+	note:SetWidth(390)
+	note:SetJustifyH("LEFT")
+	note:SetText("Preselected when a new run starts (or History opens on a new run). Change filters anytime; this only sets the starting selection.")
+
+	local yLab = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	yLab:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -406)
+	yLab:SetTextColor(0.85, 0.8, 0.65)
+	yLab:SetText("Class")
+	AddChoice("defClass", 70, -404, 78, "Current", "current", function(v)
+		RunStatsDB.defClass = v
+		Options.ApplyDefaults()
+	end, "Class: Current", "Filter to the class of the run you are in.", "Changes automatically when you start a different class.")
+	AddChoice("defClass", 154, -404, 58, "All", "all", function(v)
+		RunStatsDB.defClass = v
+		Options.ApplyDefaults()
+	end, "Class: All", "Show every class in the list.", "Ignores which class you are playing.")
+
+	yLab = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	yLab:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -430)
+	yLab:SetTextColor(0.85, 0.8, 0.65)
+	yLab:SetText("Map")
+	AddChoice("defMap", 70, -428, 78, "Current", "current", function(v)
+		RunStatsDB.defMap = v
+		Options.ApplyDefaults()
+	end, "Map: Current", "Filter to the map of the run you are in.", "Updates when you enter a new zone run.")
+	AddChoice("defMap", 154, -428, 58, "All", "all", function(v)
+		RunStatsDB.defMap = v
+		Options.ApplyDefaults()
+	end, "Map: All", "Show runs from every map.", "Useful when comparing the same class across zones.")
+
+	yLab = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	yLab:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -454)
+	yLab:SetTextColor(0.85, 0.8, 0.65)
+	yLab:SetText("Diff")
+	AddChoice("defDiff", 70, -452, 78, "Current", "current", function(v)
+		RunStatsDB.defDiff = v
+		Options.ApplyDefaults()
+	end, "Difficulty: Current", "Filter to the difficulty of your current run.", "Normal / Heroic I–V follow the live run.")
+	AddChoice("defDiff", 154, -452, 58, "Any", "any", function(v)
+		RunStatsDB.defDiff = v
+		Options.ApplyDefaults()
+	end, "Difficulty: Any", "Show every difficulty in the list.", "No difficulty filter.")
+
+	yLab = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	yLab:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -478)
+	yLab:SetTextColor(0.85, 0.8, 0.65)
+	yLab:SetText("Snapshot")
+	AddChoice("defWindow", 82, -476, 70, "Endless", "endless", function(v)
+		RunStatsDB.defWindow = v
+		Options.ApplyDefaults()
+	end, "Snapshot: Endless", "Default to the whole session.", "Includes play after the final boss (endless).")
+	AddChoice("defWindow", 158, -476, 70, "Full run", "full", function(v)
+		RunStatsDB.defWindow = v
+		Options.ApplyDefaults()
+	end, "Snapshot: Full run", "Default to stats up to the final boss kill.", "Ignores endless time after the win. Mid-run marks are chosen in the History Snapshot menu.")
+
+	yLab = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	yLab:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -502)
+	yLab:SetTextColor(0.85, 0.8, 0.65)
+	yLab:SetText("Pace")
+	AddChoice("defPace", 70, -500, 78, "Average", "average", function(v)
+		RunStatsDB.defPace = v
+		Options.ApplyDefaults()
+	end, "Pace: Average", "K/min, XP/min, G/min and DPS over the whole snapshot.", "Default when History opens on a new run.")
+	AddChoice("defPace", 154, -500, 78, "Last min", "last", function(v)
+		RunStatsDB.defPace = v
+		Options.ApplyDefaults()
+	end, "Pace: Last min", "Those rates for the final minute of the snapshot only.", "A dash means last minute was not saved.")
+
+	Options.PaintMarks()
+end
+
+Options.Paint = function()
+	if not Options.frame then return end
+	local selected = {
+		dateFmt = RunStatsDB.dateFmt or "us",
+		dateYear = RunStatsDB.dateYear == 1 and 1 or 0,
+		defClass = RunStatsDB.defClass or "current",
+		defMap = RunStatsDB.defMap or "current",
+		defDiff = RunStatsDB.defDiff or "current",
+		defWindow = RunStatsDB.defWindow or "endless",
+		defPace = RunStatsDB.defPace or "average",
+	}
+	local key, list
+	for key, list in pairs(Options.frame.groups) do
+		local i
+		for i = 1, table.getn(list) do
+			local b = list[i]
+			local on = b.value == selected[key]
+			if on then
+				b:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+				b.label:SetTextColor(1, 0.92, 0.55)
+			else
+				b:SetBackdropBorderColor(0.55, 0.45, 0.2, 0.9)
+				b.label:SetTextColor(0.96, 0.93, 0.84)
+			end
+		end
+	end
+	if Options.frame.minSlider then
+		Options.frame.minSlider.busy = 1
+		Options.frame.minSlider:SetValue(MinMins())
+		Options.frame.minSlider.busy = nil
+	end
+	if Options.frame.minLabel then
+		local mins = MinMins()
+		if mins <= 0 then
+			Options.frame.minLabel:SetText("Save every finished run (0 = no minimum).")
+		else
+			Options.frame.minLabel:SetText("Do not save runs shorter than " .. tostring(mins) .. " minutes.")
+		end
+	end
+	if Options.frame.markSlider and Options.frame.markValue then
+		local cur = math.floor(Options.frame.markSlider:GetValue() + 0.5)
+		if cur < 1 then cur = 1 end
+		if cur > CFG.MARK_RANGE then cur = CFG.MARK_RANGE end
+		Options.frame.markValue:SetText(tostring(cur) .. "m")
+	end
+	if Options.frame.markAddLabel then
+		local n = table.getn(MarkMins())
+		Options.frame.markAddLabel:SetText(
+			"Add mark (" .. tostring(n) .. "/" .. tostring(CFG.MARK_MAX) .. "):"
+		)
+	end
+	Options.PaintMarkWarn()
+end
+
+Options.Open = function()
+	if Options.frame and Options.frame:IsShown() then
+		Options.frame:Hide()
+		return
+	end
+	-- Rebuild each open so Options layout/copy changes apply without a full UI reload.
+	if Options.frame then
+		Options.frame:Hide()
+		Options.frame = nil
+	end
+	local ok, err = pcall(Options.Build)
+	if not ok then
+		Say("Options failed: " .. tostring(err))
+		return
+	end
+	if not Options.frame then
+		Say("Options frame missing.")
+		return
+	end
+	HideDiffMenu()
+	-- Options takes the Details slot to the right of the list.
+	if pop and pop:IsShown() then pop:Hide() end
+	Options.Paint()
+	Options.frame:ClearAllPoints()
+	if frame and frame:IsShown() then
+		Options.frame:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+	else
+		Options.frame:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
+	end
+	Options.frame:Show()
+	Options.frame:Raise()
+	if AZS_SetOnTopOfScreens then
+		pcall(AZS_SetOnTopOfScreens, Options.frame, true)
+		pcall(AZS_SetOnTopOfScreens, "RunStatsOptions", true)
+	end
+end
+
 local function BuildList()
 	frame = CreateFrame("Frame", "RunStatsFrame", UIParent)
 	frame:SetWidth(CFG.FRAME_W)
@@ -3592,9 +5147,10 @@ local function BuildList()
 	frame:Hide()
 	tinsert(UISpecialFrames, "RunStatsFrame")
 
+	-- Leave room on the right for Options (64) + gap + Close (52) + margin.
 	local drag = CreateFrame("Button", nil, frame)
 	drag:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -6)
-	drag:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -64, -6)
+	drag:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -136, -6)
 	drag:SetHeight(18)
 	drag:RegisterForDrag("LeftButton")
 	drag:SetScript("OnDragStart", function() frame:StartMoving() end)
@@ -3633,6 +5189,20 @@ local function BuildList()
 	close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -6)
 	close.label:SetText("Close")
 	close:SetScript("OnClick", function() Toggle() end)
+
+	local optBtn = MakeButton(frame, 64, 18)
+	optBtn:SetPoint("RIGHT", close, "LEFT", -6, 0)
+	optBtn.label:SetText("Options")
+	optBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		Options.Open()
+	end)
+	-- Keep header buttons above the drag strip.
+	if close.SetFrameLevel and drag.GetFrameLevel then
+		local lvl = drag:GetFrameLevel() + 5
+		close:SetFrameLevel(lvl)
+		optBtn:SetFrameLevel(lvl)
+	end
 
 	sub = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	sub:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -28)
@@ -3690,7 +5260,7 @@ local function BuildDetails()
 	pop:Hide()
 	tinsert(UISpecialFrames, "RunStatsTalents")
 	local popDrag = CreateFrame("Button", nil, pop)
-	popDrag:SetPoint("TOPLEFT", pop, "TOPLEFT", 150, -6)
+	popDrag:SetPoint("TOPLEFT", pop, "TOPLEFT", 228, -6)
 	popDrag:SetPoint("TOPRIGHT", pop, "TOPRIGHT", -64, -6)
 	popDrag:SetHeight(18)
 	popDrag:RegisterForDrag("LeftButton")
@@ -3703,6 +5273,25 @@ local function BuildDetails()
 	popDel:SetPoint("TOPLEFT", pop, "TOPLEFT", 8, -6)
 	popDel.label:SetText("Delete")
 	popDel:SetScript("OnClick", function() AskDelete(pop.rec) end)
+	local function DetailTip(btn, title, a, b, c)
+		btn:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+			if not GameTooltip then return end
+			GameTooltip:SetOwner(this, "ANCHOR_BOTTOM")
+			if GameTooltip.SetFrameStrata then GameTooltip:SetFrameStrata("TOOLTIP") end
+			if GameTooltip.SetFrameLevel then GameTooltip:SetFrameLevel(250) end
+			if AZS_SetOnTopOfScreens then pcall(AZS_SetOnTopOfScreens, "GameTooltip", true) end
+			GameTooltip:SetText(title, 1, 0.82, 0)
+			if a then GameTooltip:AddLine(a, 1, 1, 1, 1) end
+			if b then GameTooltip:AddLine(b, 0.9, 0.9, 0.85, 1) end
+			if c then GameTooltip:AddLine(c, 0.9, 0.9, 0.85, 1) end
+			GameTooltip:Show()
+		end)
+		btn:SetScript("OnLeave", function()
+			this:SetBackdropBorderColor(0.55, 0.45, 0.2, 0.9)
+			HideTip()
+		end)
+	end
 	statBtn = MakeButton(pop, 76, 18)
 	statBtn:SetPoint("LEFT", popDel, "RIGHT", 4, 0)
 	if RunStatsDB and RunStatsDB.allStats == 1 then
@@ -3718,6 +5307,33 @@ local function BuildDetails()
 			OpenBuild(pop.view)
 		end
 	end)
+	DetailTip(statBtn, "Character stats",
+		"Core: main combat stats only.",
+		"All stats: every recorded character stat, including zeros.",
+		"Click to toggle.")
+	pop.hitBtn = MakeButton(pop, 76, 18)
+	pop.hitBtn:SetPoint("LEFT", statBtn, "RIGHT", 4, 0)
+	if RunStatsDB and RunStatsDB.allHits == 1 then
+		pop.hitBtn.label:SetText("All hits")
+	else
+		pop.hitBtn.label:SetText("Best hit")
+	end
+	pop.hitBtn:Hide()
+	pop.hitBtn:SetScript("OnClick", function()
+		if RunStatsDB.allHits == 1 then RunStatsDB.allHits = nil else RunStatsDB.allHits = 1 end
+		if RunStatsDB.allHits == 1 then
+			pop.hitBtn.label:SetText("All hits")
+		else
+			pop.hitBtn.label:SetText("Best hit")
+		end
+		if pop.view then
+			pop.keepGraph = 1
+			OpenBuild(pop.view)
+		end
+	end)
+	DetailTip(pop.hitBtn, "Highest hits",
+		"Best hit: the single strongest hit and its ability.",
+		"All hits: every ability and its highest damage.")
 	local function MakeGraphBtn()
 		local b = MakeButton(pop, 76, 16)
 		b:Hide()
@@ -3875,13 +5491,14 @@ local function BuildMinimap()
 	PlaceMinimap()
 end
 
-local sessionId = nil
-local lastPh = nil
+local Live = { sessionId = nil, lastPh = nil, elapsed = 0 }
 
 local function SyncPop(rec)
 	if not rec or not pop or not pop:IsShown() or pop.rec ~= rec then return end
 	local sheet = rec.atEnd or rec.preview
 	if type(sheet) ~= "table" then return end
+	if type(sheet.spells) == "table" then SpellTips.Apply(sheet.spells) end
+	if type(sheet.jewelry) == "table" then sheet.jewelry = LatestJewels(sheet.jewelry) end
 	if popScroll and popScroll.GetVerticalScroll then
 		pop.scrollAt = popScroll:GetVerticalScroll()
 	end
@@ -3904,34 +5521,35 @@ local function Tick()
 	local id = RunId()
 	local sealed = nil
 	if not id then
-		if sessionId then
-			local prev = FindRun(sessionId)
+		if Live.sessionId then
+			local prev = FindRun(Live.sessionId)
 			if prev and prev.open == 1 and not prev.atEnd then
 				Finish(prev)
 				sealed = prev
 			end
-			sessionId = nil
+			Live.sessionId = nil
 		end
-		if ph == "ready" and lastPh ~= "ready" then
+		if ph == "ready" and Live.lastPh ~= "ready" then
 			CloseOpen(nil)
 			dropped = {}
 			if pop and pop.rec and pop.rec.open ~= 1 then sealed = pop.rec end
 		end
-		lastPh = ph
+		Live.lastPh = ph
 		if sealed then SyncPop(sealed) end
 		if visible then Refresh() end
 		return
 	end
 	if dropped[id] then
-		lastPh = ph
+		Live.lastPh = ph
 		if visible then Refresh() end
 		return
 	end
-	if sessionId ~= id then
-		sessionId = id
+	if Live.sessionId ~= id then
+		Live.sessionId = id
 		ResetRoundFilters()
 		anchorCache = nil
 		lastOwed = 0
+		SpellTips.Clear()
 		CloseOpen(id)
 	end
 	local rec = FindRun(id)
@@ -3939,7 +5557,7 @@ local function Tick()
 	local t = RunTime()
 	if rec.atEnd and (ph == "dead" or ph == "victory") then
 		if Finish(rec) then SyncPop(rec) end
-		lastPh = ph
+		Live.lastPh = ph
 		if visible then Refresh() end
 		return
 	end
@@ -3947,7 +5565,7 @@ local function Tick()
 		local ended = Num(rec.tEnd)
 		if ended <= 0 then ended = Num(rec.atEnd.t) end
 		local endless = rec.result == "victory" and type(AZS_RUN) == "table" and Num(AZS_RUN.endl) == 1
-		if not endless and (lastPh == "ready" or lastPh == nil or t + 15 < ended) then
+		if not endless and (Live.lastPh == "ready" or Live.lastPh == nil or t + 15 < ended) then
 			ArchiveRestart(rec)
 			anchorCache = nil
 		else
@@ -3967,6 +5585,7 @@ local function Tick()
 	TrackXp(rec)
 	Remember(rec, t)
 	NotePace(rec, t)
+	if rec.open == 1 then NoteMarks(rec, t) end
 	if rec.open == 1 and type(rec.preview) == "table" and type(rec.pending) == "table" then
 		local sheet = rec.preview
 		local p = rec.pending
@@ -3988,6 +5607,25 @@ local function Tick()
 	NoteMeter(rec, t)
 	NoteHits(rec)
 	TrackSpells(rec, t)
+	if SpellTips.pickDirty then
+		SpellTips.ApplyPickDeltas(rec)
+		if type(rec.preview) == "table" and type(rec.picks) == "table" then
+			local picks = {}
+			local i
+			for i = 1, table.getn(rec.picks) do
+				local row = rec.picks[i]
+				if type(row) == "table" then
+					tinsert(picks, {
+						t = Num(row.t), kind = row.kind or "", name = row.name or "",
+						rank = Num(row.rank), key = row.key or "", rarity = row.rarity or "",
+						icon = row.icon or "", upgrades = row.upgrades or "", stats = row.stats or "",
+					})
+				end
+			end
+			rec.preview.picks = picks
+		end
+		SyncPop(rec)
+	end
 	local len = ZoneLength(rec)
 	if Num(rec.len) <= 0 and len > 0 then rec.len = len end
 	if t > 0 then rec.seenT = t end
@@ -3999,12 +5637,12 @@ local function Tick()
 	end
 	local owed = 0
 	if type(AZS_RUN) == "table" then owed = Num(AZS_RUN.owed) end
-	if (lastPh == "choosing" and ph ~= "choosing") or owed < lastOwed then
+	if (Live.lastPh == "choosing" and ph ~= "choosing") or owed < lastOwed then
 		NoteBuild(rec, t, false)
 		anchorCache = nil
 	end
 	lastOwed = owed
-	lastPh = ph
+	Live.lastPh = ph
 	if ph == "dead" or ph == "victory" then
 		Finish(rec)
 		SyncPop(rec)
@@ -4012,75 +5650,74 @@ local function Tick()
 	if visible then Refresh() end
 end
 
-local PerfCommand
+-- Perf tooling on one table so its helpers do not burn the 200-local budget.
+local Perf = {
+	names = { "tick", "refresh", "details", "meter", "build", "hits" },
+	data = nil,
+	stack = {},
+	depth = 0,
+}
 
-do
-local PERF_NAMES = { "tick", "refresh", "details", "meter", "build", "hits" }
-local perf = nil
-local perfStack = {}
-local perfDepth = 0
-
--- Times are exclusive: a section nested in another is taken out of the outer one.
-local function PerfMark()
+Perf.Mark = function()
 	local ms = Num(debugprofilestop())
 	local kb = Num(gcinfo())
-	local d = kb - perf.lastKb
+	local d = kb - Perf.data.lastKb
 	if d < 0 then
-		perf.gcs = perf.gcs + 1
+		Perf.data.gcs = Perf.data.gcs + 1
 		d = 0
 	end
-	perf.lastKb = kb
-	if perfDepth > 0 then
-		local e = perfStack[perfDepth]
+	Perf.data.lastKb = kb
+	if Perf.depth > 0 then
+		local e = Perf.stack[Perf.depth]
 		e.ms = e.ms + ms
 		e.kb = e.kb + d
 	end
 	debugprofilestart()
 end
 
-local function PerfEnter(name)
-	PerfMark()
-	perfDepth = perfDepth + 1
-	local e = perfStack[perfDepth]
+Perf.Enter = function(name)
+	Perf.Mark()
+	Perf.depth = Perf.depth + 1
+	local e = Perf.stack[Perf.depth]
 	if not e then
 		e = {}
-		perfStack[perfDepth] = e
+		Perf.stack[Perf.depth] = e
 	end
 	e.name = name
 	e.ms = 0
 	e.kb = 0
 end
 
-local function PerfLeave()
-	PerfMark()
-	local e = perfStack[perfDepth]
-	perfDepth = perfDepth - 1
-	local s = perf.sections[e.name]
+Perf.Leave = function()
+	Perf.Mark()
+	local e = Perf.stack[Perf.depth]
+	Perf.depth = Perf.depth - 1
+	local s = Perf.data.sections[e.name]
 	s.calls = s.calls + 1
 	s.ms = s.ms + e.ms
 	s.kb = s.kb + e.kb
 	if e.ms > s.maxMs then s.maxMs = e.ms end
 end
 
-local function PerfWrap(name, fn)
+Perf.Wrap = function(name, fn)
 	return function(a, b, c, d)
-		if not perf then return fn(a, b, c, d) end
-		PerfEnter(name)
+		if not Perf.data then return fn(a, b, c, d) end
+		Perf.Enter(name)
 		local ok, r1, r2 = pcall(fn, a, b, c, d)
-		PerfLeave()
+		Perf.Leave()
 		if not ok then error(r1, 0) end
 		return r1, r2
 	end
 end
 
-Tick = PerfWrap("tick", Tick)
-Refresh = PerfWrap("refresh", Refresh)
-OpenBuild = PerfWrap("details", OpenBuild)
-MeterRate = PerfWrap("meter", MeterRate)
-ReadBuild = PerfWrap("build", ReadBuild)
-NoteHits = PerfWrap("hits", NoteHits)
+Tick = Perf.Wrap("tick", Tick)
+Refresh = Perf.Wrap("refresh", Refresh)
+OpenBuild = Perf.Wrap("details", OpenBuild)
+MeterRate = Perf.Wrap("meter", MeterRate)
+ReadBuild = Perf.Wrap("build", ReadBuild)
+NoteHits = Perf.Wrap("hits", NoteHits)
 
-local function CountTables(t, seen)
+Perf.CountTables = function(t, seen)
 	if seen[t] then return 0, 0 end
 	seen[t] = 1
 	local tables, values = 1, 0
@@ -4088,7 +5725,7 @@ local function CountTables(t, seen)
 	for k, v in pairs(t) do
 		values = values + 1
 		if type(v) == "table" then
-			local a, b = CountTables(v, seen)
+			local a, b = Perf.CountTables(v, seen)
 			tables = tables + a
 			values = values + b
 		end
@@ -4096,23 +5733,23 @@ local function CountTables(t, seen)
 	return tables, values
 end
 
-local function PerfStart()
+Perf.Start = function()
 	if not debugprofilestart or not debugprofilestop or not gcinfo then
 		Say("perf needs debugprofilestart, debugprofilestop and gcinfo, which this client lacks.")
 		return
 	end
-	perf = { t0 = GetTime(), kb0 = Num(gcinfo()), lastKb = Num(gcinfo()), gcs = 0, sections = {} }
+	Perf.data = { t0 = GetTime(), kb0 = Num(gcinfo()), lastKb = Num(gcinfo()), gcs = 0, sections = {} }
 	local i
-	for i = 1, table.getn(PERF_NAMES) do
-		perf.sections[PERF_NAMES[i]] = { calls = 0, ms = 0, kb = 0, maxMs = 0 }
+	for i = 1, table.getn(Perf.names) do
+		Perf.data.sections[Perf.names[i]] = { calls = 0, ms = 0, kb = 0, maxMs = 0 }
 	end
-	perfDepth = 0
+	Perf.depth = 0
 	debugprofilestart()
 	Say("perf started. Play a while, then /history perf show (keeps going) or /history perf (stops).")
 end
 
-local function PerfReport()
-	local secs = GetTime() - perf.t0
+Perf.Report = function()
+	local secs = GetTime() - Perf.data.t0
 	if secs < 1 then secs = 1 end
 	local ph = Phase() or "none"
 	local where = "window closed"
@@ -4121,9 +5758,9 @@ local function PerfReport()
 	Say(string.format("perf over %s, phase %s, %s.", Clock(secs), ph, where))
 	local totalMs, totalKb = 0, 0
 	local i
-	for i = 1, table.getn(PERF_NAMES) do
-		local name = PERF_NAMES[i]
-		local s = perf.sections[name]
+	for i = 1, table.getn(Perf.names) do
+		local name = Perf.names[i]
+		local s = Perf.data.sections[name]
 		totalMs = totalMs + s.ms
 		totalKb = totalKb + s.kb
 		if s.calls > 0 then
@@ -4132,30 +5769,28 @@ local function PerfReport()
 		end
 	end
 	Say(string.format("  total: %.2f ms/s, %.1f KB/s made. Lua heap %d KB (was %d KB), %d cleanups seen.",
-		totalMs / secs, totalKb / secs, Num(gcinfo()), perf.kb0, perf.gcs))
+		totalMs / secs, totalKb / secs, Num(gcinfo()), Perf.data.kb0, Perf.data.gcs))
 	if RunStatsDB then
-		local tables, values = CountTables(RunStatsDB, {})
+		local tables, values = Perf.CountTables(RunStatsDB, {})
 		Say(string.format("  saved data: %d runs, %d tables, %d values.",
 			table.getn(RunStatsDB.runs or {}), tables, values))
 	end
 end
 
-PerfCommand = function(rest)
+Perf.Command = function(rest)
 	if rest == "show" then
-		if perf then PerfReport() else Say("perf is not running. /history perf starts it.") end
+		if Perf.data then Perf.Report() else Say("perf is not running. /history perf starts it.") end
 		return
 	end
-	if perf then
-		PerfReport()
-		perf = nil
+	if Perf.data then
+		Perf.Report()
+		Perf.data = nil
 		Say("perf stopped.")
 	else
-		PerfStart()
+		Perf.Start()
 	end
 end
-end
 
-local elapsed = 0
 local driver = CreateFrame("Frame", "RunStatsDriver")
 driver:RegisterEvent("VARIABLES_LOADED")
 driver:RegisterEvent("PLAYER_LOGIN")
@@ -4174,9 +5809,9 @@ driver:SetScript("OnEvent", function()
 	end
 end)
 driver:SetScript("OnUpdate", function()
-	elapsed = elapsed + (arg1 or 0)
-	if elapsed < 1 then return end
-	elapsed = 0
+	Live.elapsed = Live.elapsed + (arg1 or 0)
+	if Live.elapsed < 1 then return end
+	Live.elapsed = 0
 	Tick()
 end)
 
@@ -4191,7 +5826,7 @@ SlashCmdList["RUNSTATS"] = function(msg)
 	cmd = string.gsub(cmd, "%s+$", "")
 	if string.sub(cmd, 1, 4) == "perf" then
 		local rest = string.gsub(string.sub(cmd, 5), "^%s+", "")
-		PerfCommand(rest)
+		Perf.Command(rest)
 		return
 	end
 	Toggle()
