@@ -67,19 +67,21 @@ Filter by class, map, and difficulty. Switch between endless, the full run, and 
 
 ### Run details
 
-Kills, damage, gold, and the character's stats.
+Date and time, pace for the whole run and the last minute, kills, gold, and the highest hit.
 
-![Run details, with kills and character stats](screenshots/history-stats.png)
+![Run details, with pace, kills, and the highest hit](screenshots/history-stats.png)
 
 ### Spells, jewelry, and damage
 
-Spells, with the total upgrades for each one, and jewelry, with what the piece does while equipped. Damage done, and each ability's share of that damage.
+Character stats. Spells, with the total upgrades for each one, and jewelry, with what the piece does while equipped. Damage done, and each ability's share of that damage.
 
-![Spells, jewelry, and damage done](screenshots/history-build.png)
+![Spells, with the total upgrades for each one](screenshots/history-build.png)
+
+![Jewelry, and each ability's share of the damage](screenshots/history-damage.png)
 
 ### Damage taken and pickups
 
-Damage for the last minute, damage taken, and pickups over time.
+Damage taken, with each source's share, and pickups with the increase from that rank.
 
 ![Damage taken and pickups over time](screenshots/history-pickups.png)
 
