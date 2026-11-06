@@ -4,7 +4,7 @@ Core Comforts (and armory) and Run History are addons for [Azeroth Survivors](ht
 
 ## Core Comforts
 
-Boss and guardian health bars, with debuffs and an experimental estimate of damage over time. Guardian timers, and minimap pins for guardians and caches. Every option can be turned on or off. `/cc` opens the window.
+Boss and guardian health bars, with debuffs and an estimate of damage over time. The same estimate is drawn on the target frame. Guardian timers, and minimap pins for guardians and caches. Every option can be turned on or off. `/cc` opens the window.
 
 ### Direction arrows, tally, and jewelry
 
@@ -36,8 +36,9 @@ Direction arrows for a cache and a guardian. Kill count, gold, and caches. The c
 </td>
 <td width="50%" align="center" valign="top">
 <h3>Boss timer and health bars</h3>
-<p>Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an experimental estimate of the damage over time.</p>
+<p>Boss timer, drawn as a progress bar. Boss health bars with debuffs, and an estimate of the damage over time. The same estimate is drawn on the target's health bar.</p>
 <img src="screenshots/boss-bars.png" alt="Boss timer and boss health bars" width="100%">
+<img src="screenshots/target-frame.png" alt="Damage over time estimate on the target frame" width="100%">
 </td>
 </tr>
 </table>

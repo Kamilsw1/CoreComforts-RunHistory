@@ -71,7 +71,13 @@ local function Say(msg)
 end
 
 local function On(key)
-	if key == "dotestimate" or key == "nameplates" or key == "luckodds" then
+	-- DoT estimate options default on; nameplates / luckodds stay opt-in.
+	if key == "dotestimate" or key == "dottarget" or key == "dottalent" then
+		local picked = CoreComfortsDB[key]
+		if picked == false or picked == 0 then return false end
+		return true
+	end
+	if key == "nameplates" or key == "luckodds" then
 		local picked = CoreComfortsDB[key]
 		return picked == true or picked == 1
 	end
@@ -122,6 +128,7 @@ local playerHealthText
 local playerPowerText
 local playerHealthState = {}
 local playerPowerState = {}
+local TargetDotSum
 
 local function EnsureBarText(bar, text, globalName)
 	if text or not bar then return text end
@@ -231,8 +238,78 @@ local function HealthPaceText(value)
 	return string.format("every %.2f s", HealthSeconds(value))
 end
 
+local targetDotBar
+local targetTextHolder
+
+local function EnsureTargetTextHolder()
+	if targetTextHolder then return targetTextHolder end
+	local bar = TargetFrameHealthBar
+	if not bar then return end
+	-- Above the orange DoT strip, so "8788 / 12017" stays readable.
+	targetTextHolder = CreateFrame("Frame", "CoreComfortsTargetHealthTextHolder", bar)
+	targetTextHolder:SetAllPoints(bar)
+	targetTextHolder:SetFrameLevel(bar:GetFrameLevel() + 5)
+	return targetTextHolder
+end
+
+local function EnsureTargetDotBar()
+	if targetDotBar then return targetDotBar end
+	local bar = TargetFrameHealthBar
+	if not bar then return end
+	-- Above the green fill, below the health text holder.
+	targetDotBar = CreateFrame("Frame", "CoreComfortsTargetDot", bar)
+	targetDotBar:SetFrameLevel(bar:GetFrameLevel() + 1)
+	targetDotBar:Hide()
+	local tex = targetDotBar:CreateTexture(nil, "ARTWORK")
+	tex:SetTexture("Interface\\TargetingFrame\\UI-StatusBar")
+	tex:SetVertexColor(1, 0.85, 0.1)
+	tex:SetAllPoints(targetDotBar)
+	targetDotBar.tex = tex
+	return targetDotBar
+end
+
+local function UpdateTargetDot()
+	local overlay = EnsureTargetDotBar()
+	if not overlay then return end
+	if not On("dottarget") or not TargetDotSum then
+		overlay:Hide()
+		return
+	end
+	if LearnDots then LearnDots() end
+	local dot, hp, hpm = TargetDotSum()
+	if not Num(dot) or not Num(hp) or not Num(hpm) or hpm <= 0 or dot <= 0 or hp <= 0 then
+		overlay:Hide()
+		return
+	end
+	if dot > hp then dot = hp end
+	local bar = TargetFrameHealthBar
+	local width = bar:GetWidth()
+	local height = bar:GetHeight()
+	if not width or width <= 0 or not height or height <= 0 then
+		overlay:Hide()
+		return
+	end
+	local shown = width * (dot / hpm)
+	local left = width * ((hp - dot) / hpm)
+	if shown < 1 then
+		overlay:Hide()
+		return
+	end
+	-- Inset 1 px top and bottom so the bar border stays visible.
+	local pad = 1
+	local inner = height - pad * 2
+	if inner < 1 then inner = 1 end
+	overlay:ClearAllPoints()
+	overlay:SetPoint("TOPLEFT", bar, "TOPLEFT", left, -pad)
+	overlay:SetWidth(shown)
+	overlay:SetHeight(inner)
+	overlay:Show()
+end
+
 local function UpdateHealth()
-	healthText = PaintHealth(TargetFrameHealthBar, healthText, "health", "target", "CoreComfortsHealthText")
+	local holder = EnsureTargetTextHolder() or TargetFrameHealthBar
+	healthText = PaintHealth(holder, healthText, "health", "target", "CoreComfortsHealthText")
+	UpdateTargetDot()
 	targetPowerText = EnsureBarText(TargetFrameManaBar, targetPowerText, "CoreComfortsTargetPowerText")
 	if not targetPowerText then return end
 	local current, maximum
@@ -2216,7 +2293,7 @@ local function BossRow(index)
 	bar:SetFrameLevel(row:GetFrameLevel() + 3)
 	local orange = CreateFrame("StatusBar", nil, row)
 	orange:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-	orange:SetStatusBarColor(1, 0.5, 0.05)
+	orange:SetStatusBarColor(1, 0.85, 0.1)
 	orange:SetMinMaxValues(0, 1)
 	orange:SetAllPoints(bg)
 	orange:SetFrameLevel(row:GetFrameLevel() + 2)
@@ -2302,70 +2379,56 @@ local function CollectEffects(unit, into)
 end
 
 ----------------------------------------------------------------
--- DoT estimate. Per boss or guardian and per DoT, the periodic
--- hits of the last few seconds give a damage rate. The estimate
--- is that rate from the last hit to when the DoT runs out, so it
--- drops when a tick lands instead of on a clock of its own.
+-- DoT estimate. One version, built on how the game works:
+--  * A DoT tick never crits, so every tick of one stack is the same size.
+--  * DoT haste adds ticks to the same duration; it does not shorten it.
+--  * Every stack is one application of the spell, and each deals the
+--    amount on the spell's own tooltip ("N damage over S sec").
+-- For every DoT, the damage rate of ONE stack comes from the spell's
+-- tooltip (checked in play: its tick size equals the real ticks). Ticks
+-- seen on the boss only time the last tick, and stand in if there is no
+-- tooltip. The estimate is that rate times the stacks times the time from
+-- the last tick to when the DoT runs out, so it drops when a tick lands
+-- instead of on a clock of its own.
+-- Talent hits (like Shadow Weaving) are not DoT damage and are left out.
 -- Everything is timed on the run clock, which stops in pauses.
 ----------------------------------------------------------------
 
-local LearnDots, EffectEstimate, DotDebug
+local LearnDots, EffectEstimate
 do
 	local function BuildDots()
-		-- Five estimate versions from this chat's history:
-		-- 1 Original: per-stack tick x stacks x ticks left (before the rewrite)
-		-- 2 First rewrite: recent DoT rate x time left (the one that felt best)
-		-- 3 Meter calibrated: same as 2, scaled to the boss damage meter
-		-- 4 Meter calibrated + talent hits (Shadowy Weaving era)
-		-- 5 First rewrite + talent hits (before the multi-version options)
 		local DOT_WINDOW = 6
 		local DOT_BREAK = 4
 		local DOT_MIN_SPAN = 0.5
-		local CAL_MIN_SPAN = 4
-		local DEBUG_EVERY = 3
+		local TIP_DELAY = 0.45
+		local TIP_EVERY = 8
 		local dotUnits = {}
-		local dotSpells = {}
 		local dotFeed = {}
-		local feedTotals = {}
-		local calHist = {}
-		local calib = {}
 		local dotLoad = {}
-		local bossLoad = {}
-		local bossIds = {}
-		local dotDebug = { on = false, clock = 0, counts = {}, sampled = {}, meter = {} }
-		local DebugReport
+		local dotTips = {}
+		local dotTipIds = {}
+		local dotTipIcons = {}
+		local targetAuras = {}
+		local tipNeeded = true
+		local tipWait = TIP_DELAY
+		local tipAge = 0
+		local tipPhase
+		local tipOwed
+		local tipWatch
+		local talentDurations = {}
+		local tipFrame
+		local tipScan
 
-		local function DebugNote(event, outcome)
-			if not dotDebug.on then return end
-			local label = event.meterSource
-			if type(label) ~= "string" or label == "" then label = event.abilityName end
-			if type(label) ~= "string" or label == "" then label = "?" end
-			local c = dotDebug.counts[label]
-			if not c then
-				c = { hit = 0, sum = 0, crit = 0, noUnit = 0, noDebuff = 0, direct = 0, directSum = 0, proc = 0, procSum = 0 }
-				dotDebug.counts[label] = c
-			end
-			c[outcome] = c[outcome] + 1
-			if outcome == "hit" then
-				c.sum = c.sum + (Num(event.amount) or 0)
-				if event.critical == true or event.critical == 1 then c.crit = c.crit + 1 end
-			elseif outcome == "direct" then
-				c.directSum = c.directSum + (Num(event.amount) or 0)
-			elseif outcome == "proc" then
-				c.procSum = c.procSum + (Num(event.amount) or 0)
-			end
-			local sampleKey = label .. " " .. outcome
-			if dotDebug.sampled[sampleKey] then return end
-			dotDebug.sampled[sampleKey] = true
-			local keys = {}
-			local k, v
-			for k, v in pairs(event) do
-				if type(v) ~= "table" and type(v) ~= "function" then
-					tinsert(keys, tostring(k) .. "=" .. tostring(v))
-				end
-			end
-			table.sort(keys)
-			Say("DoT event " .. label .. " (" .. outcome .. "): " .. table.concat(keys, " ") .. string.format(" (GetTime %.2f)", GetTime()))
+		local function DotWanted()
+			return On("dotestimate") or On("dottarget")
+		end
+
+		-- Re-read after a level-up / cache / jewelry pick (short delay so the
+		-- game can apply it), and also on a slow timer for temporary buffs.
+		local function RequestDotTips(delay)
+			tipNeeded = true
+			if Num(delay) then tipWait = delay else tipWait = TIP_DELAY end
+			if tipFrame then tipFrame.idle = 0 end
 		end
 
 		local function DotNow()
@@ -2375,10 +2438,6 @@ do
 
 		local function ClearDots()
 			dotUnits = {}
-			dotSpells = {}
-			feedTotals = {}
-			calHist = {}
-			calib = {}
 		end
 
 		local function EventTime(event, now)
@@ -2390,14 +2449,9 @@ do
 			return now
 		end
 
-		local function DotMode()
-			local mode = Num(CoreComfortsDB.dotmode)
-			if not mode then return 2 end
-			mode = math.floor(mode + 0.5)
-			if mode < 1 or mode > 5 then return 2 end
-			return mode
-		end
-
+		-- Damage per second of ONE stack, from the ticks seen. Each tick is
+		-- divided by the stacks that were on the boss when it landed, so it
+		-- is right whether the game sends one tick for all stacks or one per stack.
 		local function DotRate(rec)
 			local hits = rec.hits
 			local n = table.getn(hits)
@@ -2406,84 +2460,155 @@ do
 			if span < DOT_MIN_SPAN then return end
 			local sum = 0
 			local i
-			for i = 2, n do sum = sum + hits[i].amount end
+			for i = 2, n do sum = sum + hits[i].amount / hits[i].load end
 			return sum / span, span
 		end
 
-		local function ProcRate(rec, now, useCalib)
-			local total = 0
-			if not rec.procs then return total end
-			local label, proc
-			for label, proc in pairs(rec.procs) do
-				local hits = proc.hits
-				local n = table.getn(hits)
-				if n > 0 and now - hits[n].t < DOT_BREAK then
-					local r = DotRate(proc)
-					if r then
-						if useCalib then r = r * (calib[label] or 1) end
-						total = total + r
-					end
-				end
-			end
-			return total
-		end
-
-		local function SampleCalibration(now)
-			local lines = AZS_GetBossMeter and AZS_GetBossMeter()
-			local seen = {}
+		-- The spell's tooltip: "<total> <school> damage over <secs> sec, in <ticks> ticks".
+		-- The ticks already count your DoT haste, and the total is for one stack.
+		local function ParseTip(lines)
 			local i
-			for i = 1, Count(lines) do
-				local line = lines[i]
-				if type(line) == "table" and type(line.name) == "string" and Num(line.dmg) then
-					local name = line.name
-					local meter = line.dmg
-					local feed = feedTotals[name] or 0
-					seen[name] = true
-					local hist = calHist[name]
-					if not hist then
-						hist = {}
-						calHist[name] = hist
-					end
-					local n = table.getn(hist)
-					if n > 0 and (meter < hist[n].m or now < hist[n].t) then
-						hist = {}
-						calHist[name] = hist
-						n = 0
-					end
-					if n == 0 or hist[n].m ~= meter or hist[n].f ~= feed or now - hist[n].t >= 1 then
-						tinsert(hist, { t = now, m = meter, f = feed })
-					end
-					while table.getn(hist) > 2 and now - hist[2].t > DOT_WINDOW do
-						table.remove(hist, 1)
-					end
-					n = table.getn(hist)
-					local first = hist[1]
-					local last = hist[n]
-					local dm = last.m - first.m
-					local df = last.f - first.f
-					if n >= 2 and last.t - first.t >= CAL_MIN_SPAN and dm > 0 and df > 0 then
-						local ratio = dm / df
-						if ratio < 0.25 then ratio = 0.25 end
-						if ratio > 8 then ratio = 8 end
-						if calib[name] then calib[name] = calib[name] * 0.9 + ratio * 0.1 else calib[name] = ratio end
+			for i = 1, table.getn(lines) do
+				local a, b, total, secs, ticks = string.find(lines[i], "([%d,%.]+) [%a ]-damage over ([%d%.]+) sec, in (%d+) ticks")
+				if a then
+					total = tonumber((string.gsub(total, ",", "")))
+					secs = tonumber(secs)
+					ticks = tonumber(ticks)
+					if total and secs and ticks and total > 0 and secs > 0 and ticks > 0 then
+						return total, secs, ticks
 					end
 				end
 			end
-			local name
-			for name in pairs(calHist) do
-				if not seen[name] then calHist[name] = nil end
+		end
+
+		local function TipSpell(slot)
+			local n = table.getn(AZS_SPELLS)
+			if slot == 12 then return AZS_SPELLS[n] end
+			if slot >= 1 and slot <= n - 1 then return AZS_SPELLS[slot] end
+		end
+
+		local function TipBegin(s)
+			while s.slot <= 12 do
+				local spell = TipSpell(s.slot)
+				if spell then
+					s.spell = spell
+					tipScan:SetOwner(UIParent, "ANCHOR_NONE")
+					tipScan:SetAction(s.slot)
+					s.wait = 0
+					return true
+				end
+				s.slot = s.slot + 1
 			end
 		end
 
-		local function MeterRate(name, now)
-			local hist = calHist[name]
-			if not hist or table.getn(hist) < 2 then return end
-			local first = hist[1]
-			local span = now - first.t
-			if span < CAL_MIN_SPAN then return end
-			return (hist[table.getn(hist)].m - first.m) / span
+		local function TipRead()
+			local lines = {}
+			local name
+			local n = 0
+			if tipScan.NumLines then n = tipScan:NumLines() or 0 end
+			local i
+			for i = 1, n do
+				local left = getglobal("CoreComfortsDotTipTextLeft" .. i)
+				local text = left and left.GetText and left:GetText()
+				if type(text) == "string" then
+					if i == 1 then name = text end
+					tinsert(lines, text)
+				end
+			end
+			return name, lines
 		end
 
+		-- Reads every spell's tooltip, one slot every few frames, when a pick
+		-- just landed or the slow buff timer says so.
+		tipFrame = CreateFrame("Frame", "CoreComfortsDotTips")
+		tipFrame.idle = 0
+		tipFrame:SetScript("OnUpdate", function()
+			if not DotWanted() or type(AZS_SPELLS) ~= "table" or table.getn(AZS_SPELLS) < 1 then return end
+			local s = this.state
+			if not s then
+				tipAge = tipAge + arg1
+				if tipAge >= TIP_EVERY then
+					tipAge = 0
+					RequestDotTips(0)
+				end
+				if not tipNeeded then return end
+				this.idle = this.idle + arg1
+				if this.idle < tipWait then return end
+				this.idle = 0
+				if not tipScan then
+					local ok, made = pcall(CreateFrame, "GameTooltip", "CoreComfortsDotTip", UIParent, "GameTooltipTemplate")
+					if not ok or not made or not made.SetAction or not made.NumLines then
+						tipWait = 5
+						return
+					end
+					tipScan = made
+				end
+				s = { slot = 1, wait = 0, byName = {}, byId = {}, byIcon = {} }
+				if not TipBegin(s) then return end
+				tipNeeded = false
+				tipAge = 0
+				this.state = s
+				return
+			end
+			s.wait = s.wait + 1
+			if s.wait < 3 then return end
+			local name, lines = TipRead()
+			tipScan:Hide()
+			local total, secs, ticks = ParseTip(lines)
+			if total then
+				local icon = GetActionTexture and GetActionTexture(s.slot)
+				local entry = { rate = total / secs, total = total, secs = secs, ticks = ticks, name = name, icon = icon, spell = s.spell.spell }
+				if name then s.byName[name] = entry end
+				if Num(s.spell.spell) then s.byId[s.spell.spell] = entry end
+				if type(icon) == "string" and icon ~= "" then s.byIcon[icon] = entry end
+			end
+			s.slot = s.slot + 1
+			if not TipBegin(s) then
+				this.state = nil
+				dotTips = s.byName
+				dotTipIds = s.byId
+				dotTipIcons = s.byIcon
+			end
+		end)
+
+		tipWatch = CreateFrame("Frame", "CoreComfortsDotTipWatch")
+		tipWatch:RegisterEvent("CHAT_MSG_ADDON")
+		tipWatch:RegisterEvent("UNIT_INVENTORY_CHANGED")
+		tipWatch:RegisterEvent("PLAYER_ENTERING_WORLD")
+		tipWatch:SetScript("OnEvent", function()
+			if not DotWanted() then return end
+			if event == "PLAYER_ENTERING_WORLD" then
+				RequestDotTips(1)
+				return
+			end
+			if event == "UNIT_INVENTORY_CHANGED" then
+				if arg1 == "player" then RequestDotTips(TIP_DELAY) end
+				return
+			end
+			if event ~= "CHAT_MSG_ADDON" then return end
+			if arg1 == "AZSSPELLS" or arg1 == "AZS" then
+				RequestDotTips(TIP_DELAY)
+				return
+			end
+			if arg1 ~= "AZSRUN" then return end
+			local phase = AZS_GetPhase and AZS_GetPhase()
+			local owed = type(AZS_RUN) == "table" and Num(AZS_RUN.owed)
+			if tipPhase == "choosing" and phase == "playing" then RequestDotTips(TIP_DELAY) end
+			if tipOwed and owed and owed < tipOwed then RequestDotTips(TIP_DELAY) end
+			tipPhase = phase
+			tipOwed = owed
+		end)
+
+		local function TipFor(effect)
+			if type(effect) ~= "table" then return end
+			local tip = effect.name and dotTips[effect.name]
+			if tip then return tip end
+			local id = Num(effect.spell)
+			if id and dotTipIds[id] then return dotTipIds[id] end
+			if type(effect.icon) == "string" and dotTipIcons[effect.icon] then return dotTipIcons[effect.icon] end
+		end
+
+		-- Stacks on the unit, per DoT name.
 		local function UnitLoad(unit)
 			local load = {}
 			local list = AZS_GetDebuffs(unit.id)
@@ -2497,40 +2622,6 @@ do
 				end
 			end
 			return load
-		end
-
-		-- mode: 2/5 feed(+procs), 3/4 feed*calib or meter share(+procs)
-		local function UnitRate(unit, name, now, mode)
-			local rec = dotUnits[unit.id] and dotUnits[unit.id][name]
-			local feed = rec and DotRate(rec)
-			local spell = dotSpells[name]
-			local learned = spell and spell.rate
-			local wantProcs = mode == 4 or mode == 5
-			local wantCalib = mode == 3 or mode == 4
-			local procs = 0
-			if wantProcs and rec then procs = ProcRate(rec, now, wantCalib) end
-			local tick
-			if wantCalib then
-				local factor = calib[name]
-				if feed and factor then
-					tick = feed * factor
-				elseif bossIds[unit.id] then
-					local load = dotLoad[unit.id] and dotLoad[unit.id][name]
-					local total = bossLoad[name]
-					local mr = MeterRate(name, now)
-					if load and total and total > 0 and mr and mr > 0 then tick = mr * load / total end
-				end
-				if not tick and feed then tick = feed end
-				if not tick and learned then
-					local load = dotLoad[unit.id] and dotLoad[unit.id][name]
-					if load then tick = learned * load * (factor or 1) end
-				end
-			else
-				tick = feed or learned
-			end
-			if not tick and procs > 0 then tick = 0 end
-			if not tick then return nil, rec, feed, procs end
-			return tick + procs, rec, feed, procs
 		end
 
 		local function DotTarget(event, bosses, guardians)
@@ -2547,11 +2638,17 @@ do
 					local u = guardians[i]
 					if type(u) == "table" and u.id == id and (not named or u.name == target) then return u end
 				end
+				if type(AZS_TARGET) == "table" and Num(AZS_TARGET.id) == id then
+					return { id = AZS_TARGET.id, name = AZS_TARGET.name or target }
+				end
 			end
 			if not named then return end
 			for i = 1, Count(bosses) do
 				local u = bosses[i]
 				if type(u) == "table" and u.name == target then return u end
+			end
+			if type(AZS_TARGET) == "table" and AZS_TARGET.name == target and Num(AZS_TARGET.id) then
+				return { id = AZS_TARGET.id, name = target }
 			end
 			if type(AZS_UNITS) == "table" then
 				local same = 0
@@ -2567,6 +2664,41 @@ do
 			end
 		end
 
+		local function DebuffNamed(unit, label, spellId)
+			if not AZS_GetDebuffs or not Num(unit.id) or type(label) ~= "string" then return end
+			local list = AZS_GetDebuffs(unit.id)
+			local i
+			for i = 1, Count(list) do
+				local candidate = list[i]
+				if type(candidate) == "table" and candidate.permanent ~= true and candidate.permanent ~= 1 then
+					local name = candidate.name
+					if type(name) == "string" and name ~= "" then
+						if name == label or (spellId and Num(candidate.spell) and spellId == candidate.spell) then
+							return candidate
+						end
+					end
+				end
+			end
+		end
+
+		local function NoteTalentAura(unit, name, effect, stacks, now)
+			if not On("dottalent") or type(name) ~= "string" then return end
+			local dur = effect and Num(effect.duration)
+			if dur and dur > 0 then talentDurations[name] = dur end
+			dur = talentDurations[name] or dur
+			local left = effect and Num(effect.remaining)
+			if (not left or left <= 0) and dur then left = dur end
+			if not left or left <= 0 or not dur then return end
+			if not targetAuras[unit.id] then targetAuras[unit.id] = {} end
+			local old = targetAuras[unit.id][name]
+			local ends = now + left
+			if old and Num(old.stacks) == stacks and old.ends and old.ends > now and left >= (old.ends - now) - 0.25 then
+				ends = old.ends
+			end
+			if old and stacks > (Num(old.stacks) or 0) then ends = now + dur end
+			targetAuras[unit.id][name] = { ends = ends, stacks = stacks, duration = dur }
+		end
+
 		local function NoteCombat(event, bosses, guardians, now)
 			if type(event) ~= "table" or event.kind ~= "damage" then return end
 			if event.reflected == true or event.reflected == 1 then return end
@@ -2577,50 +2709,50 @@ do
 			if type(ability) ~= "string" or ability == "" then ability = nil end
 			local source = event.meterSource
 			if type(source) ~= "string" or source == "" then source = ability end
-			local borrowed = ability and source and source ~= ability
 			local unit = DotTarget(event, bosses, guardians)
-			if type(unit) ~= "table" or not Num(unit.id) then
-				if periodic then DebugNote(event, "noUnit") end
-				return
+			-- Shadow Weaving-style hits: DoT ability name, different meter source, no
+			-- matching debuff for that source. Talent DoTs like Ignite use the
+			-- talent as meterSource and that name is the debuff — those count.
+			local talentEffect
+			if ability and source and source ~= ability then
+				if On("dottalent") and type(unit) == "table" then
+					talentEffect = DebuffNamed(unit, source, Num(event.spellId))
+				end
+				if not talentEffect then return end
+				periodic = true
 			end
-			if source and bossIds[unit.id] then
-				feedTotals[source] = (feedTotals[source] or 0) + amount
-			end
-			if not periodic and not borrowed then
-				DebugNote(event, "direct")
-				return
-			end
-			local list = AZS_GetDebuffs(unit.id)
-			local effect
-			local i
-			for i = 1, Count(list) do
-				local candidate = list[i]
-				if type(candidate) == "table" and candidate.permanent ~= true and candidate.permanent ~= 1 then
-					local label = candidate.name
-					if type(label) == "string" and label ~= "" then
-						local match
-						if borrowed then
-							match = label == ability
-						else
-							match = label == source or (Num(event.spellId) and Num(candidate.spell) and event.spellId == candidate.spell)
-						end
-						if match then
-							effect = candidate
-							break
-						end
+			if not periodic then
+				-- A fresh cast of a DoT resets its remaining time on ordinary targets,
+				-- where AZS_GetDebuffs does not report durations.
+				if type(unit) == "table" and Num(unit.id) then
+					local tip = (ability and dotTips[ability]) or (source and dotTips[source])
+					local label = tip and tip.name or ability or source
+					if tip and type(label) == "string" then
+						if not targetAuras[unit.id] then targetAuras[unit.id] = {} end
+						local stacks = 1
+						if dotLoad[unit.id] and Num(dotLoad[unit.id][label]) then stacks = dotLoad[unit.id][label] end
+						targetAuras[unit.id][label] = { ends = now + tip.secs, stacks = stacks, duration = tip.secs }
 					end
 				end
+				return
+			end
+			if type(unit) ~= "table" or not Num(unit.id) then return end
+			local effect = talentEffect or DebuffNamed(unit, source, Num(event.spellId))
+			if not effect and ability and ability ~= source then
+				effect = DebuffNamed(unit, ability, Num(event.spellId))
 			end
 			local byUnit = dotUnits[unit.id]
-			local key = source
-			if borrowed then key = ability end
 			local name
 			if effect then
 				name = effect.name
-			elseif byUnit and key and byUnit[key] then
-				name = key
+			elseif source and dotTips[source] then
+				name = dotTips[source].name or source
+			elseif On("dottalent") and source and not dotTips[source] then
+				-- Talent DoT ticks before AZS lists the debuff, or on a normal enemy.
+				name = source
+			elseif byUnit and source and byUnit[source] then
+				name = source
 			else
-				DebugNote(event, "noDebuff")
 				return
 			end
 			if not byUnit then
@@ -2633,70 +2765,21 @@ do
 				byUnit[name] = rec
 			end
 			local at = EventTime(event, now)
-			if borrowed then
-				DebugNote(event, "proc")
-				if not rec.procs then rec.procs = {} end
-				local proc = rec.procs[source]
-				if not proc then
-					proc = { hits = {} }
-					rec.procs[source] = proc
-				end
-				local ph = proc.hits
-				local pn = table.getn(ph)
-				if pn > 0 and at - ph[pn].t > DOT_BREAK then
-					proc.hits = {}
-					ph = proc.hits
-				end
-				tinsert(ph, { t = at, amount = amount })
-				while table.getn(ph) > 1 and at - ph[1].t > DOT_WINDOW do
-					table.remove(ph, 1)
-				end
-				if not rec.last or at > rec.last then rec.last = at end
-				return
-			end
-			DebugNote(event, "hit")
 			local hits = rec.hits
 			local n = table.getn(hits)
-			local prev
-			if n > 0 then
-				if at - hits[n].t > DOT_BREAK then
-					rec.hits = {}
-					hits = rec.hits
-				else
-					prev = hits[n].t
-				end
+			if n > 0 and at - hits[n].t > DOT_BREAK then
+				rec.hits = {}
+				hits = rec.hits
 			end
-			tinsert(hits, { t = at, amount = amount })
+			local load = dotLoad[unit.id] and dotLoad[unit.id][name] or 1
+			if effect and Num(effect.stacks) then load = effect.stacks end
+			if load < 1 then load = 1 end
+			tinsert(hits, { t = at, amount = amount, load = load })
 			while table.getn(hits) > 1 and at - hits[1].t > DOT_WINDOW do
 				table.remove(hits, 1)
 			end
 			if not rec.last or at > rec.last then rec.last = at end
-			local stacks = 1
-			if effect then
-				stacks = Num(effect.stacks) or 1
-				if stacks < 1 then stacks = 1 end
-				rec.stacks = stacks
-			end
-			local spell = dotSpells[name]
-			if not spell then
-				spell = {}
-				dotSpells[name] = spell
-			end
-			-- Original learning: non-crit tick size per stack, and gap between ticks.
-			if event.critical ~= true and event.critical ~= 1 then
-				local one = amount / stacks
-				if spell.dmg then spell.dmg = spell.dmg * 0.8 + one * 0.2 else spell.dmg = one end
-			end
-			if prev and at > prev then
-				local gap = at - prev
-				if gap >= 0.2 and gap <= 12 then
-					if spell.interval then spell.interval = spell.interval * 0.8 + gap * 0.2 else spell.interval = gap end
-				end
-			end
-			local rate = DotRate(rec)
-			if rate then
-				if spell.rate then spell.rate = spell.rate * 0.7 + rate * 0.3 else spell.rate = rate end
-			end
+			NoteTalentAura(unit, name, effect, load, now)
 		end
 
 		local function ReadCombatTicks(bosses, guardians, now)
@@ -2730,67 +2813,79 @@ do
 		end
 
 		LearnDots = function()
-			if not On("dotestimate") or not AZS_GetDebuffs then return end
+			if not DotWanted() then return end
+			if not tipFrame.state then
+				local any
+				local _k
+				for _k in pairs(dotTips) do any = true break end
+				if not any then RequestDotTips(0.2) end
+			end
 			local bosses = AZS_GetBosses and AZS_GetBosses()
 			local guardians = AZS_GetGuardians and AZS_GetGuardians()
 			local now = DotNow()
 			local alive = {}
 			dotLoad = {}
-			bossLoad = {}
-			bossIds = {}
-			local i, name, stacks
+			local i
 			for i = 1, Count(bosses) do
 				local boss = bosses[i]
 				if type(boss) == "table" and Num(boss.id) then
 					alive[boss.id] = true
-					bossIds[boss.id] = true
-					local load = UnitLoad(boss)
-					dotLoad[boss.id] = load
-					for name, stacks in pairs(load) do bossLoad[name] = (bossLoad[name] or 0) + stacks end
+					if AZS_GetDebuffs then dotLoad[boss.id] = UnitLoad(boss) end
 				end
 			end
 			for i = 1, Count(guardians) do
 				local guardian = guardians[i]
 				if type(guardian) == "table" and Num(guardian.id) then
 					alive[guardian.id] = true
-					dotLoad[guardian.id] = UnitLoad(guardian)
+					if AZS_GetDebuffs then dotLoad[guardian.id] = UnitLoad(guardian) end
+				end
+			end
+			if type(AZS_TARGET) == "table" and Num(AZS_TARGET.id) then
+				alive[AZS_TARGET.id] = true
+				if AZS_GetDebuffs and not dotLoad[AZS_TARGET.id] then
+					dotLoad[AZS_TARGET.id] = UnitLoad(AZS_TARGET)
 				end
 			end
 			ReadCombatTicks(bosses, guardians, now)
-			SampleCalibration(now)
 			local id
 			for id in pairs(dotUnits) do
 				if not alive[id] then dotUnits[id] = nil end
 			end
-			if DebugReport then DebugReport(bosses, guardians) end
+			for id in pairs(targetAuras) do
+				if not alive[id] then targetAuras[id] = nil end
+			end
 		end
 
-		EffectEstimate = function(unit, effect, copies, mode)
-			if not On("dotestimate") or type(unit) ~= "table" or type(effect) ~= "table" or type(effect.name) ~= "string" then return end
+		-- Rate of one stack: bar DoTs from the spell tooltip; talent DoTs
+		-- (Ignite, …) from their ticks when that option is on.
+		local function StackRate(unit, effect, now)
+			local byUnit = dotUnits[unit.id]
+			local rec = byUnit and byUnit[effect.name]
+			local tip = TipFor(effect)
+			if tip then return tip.rate, rec, "tooltip" end
+			local rate
+			if rec and rec.last and now - rec.last < DOT_BREAK then rate = DotRate(rec) end
+			if not rate or rate <= 0 then return nil, rec end
+			if On("dottalent") then return rate, rec, "ticks" end
+			-- Tips still loading: allow ticks so bar DoTs are not blank at the start.
+			local any
+			local _k
+			for _k in pairs(dotTips) do any = true break end
+			if not any then return rate, rec, "ticks" end
+			return nil, rec
+		end
+
+		EffectEstimate = function(unit, effect)
+			if not DotWanted() or type(unit) ~= "table" or type(effect) ~= "table" or type(effect.name) ~= "string" then return end
 			if effect.permanent == true or effect.permanent == 1 then return end
 			local left = Num(effect.remaining)
 			if not left or left <= 0 then return end
-			mode = mode or DotMode()
 			local stacks = Num(effect.stacks) or 1
 			if stacks < 1 then stacks = 1 end
-			local spell = dotSpells[effect.name]
-
-			-- 1: original tick x stacks x ticks left
-			if mode == 1 then
-				if not spell or not spell.dmg or not spell.interval or spell.interval <= 0 then return end
-				local ticksLeft = math.ceil(left / spell.interval - 0.05)
-				if ticksLeft < 1 then return end
-				return spell.dmg * stacks * ticksLeft
-			end
-
 			local now = DotNow()
-			local rate, rec = UnitRate(unit, effect.name, now, mode)
+			local rate, rec = StackRate(unit, effect, now)
 			if not rate or rate <= 0 then return end
-			if rec and rec.stacks and rec.stacks > 0 and stacks ~= rec.stacks then
-				rate = rate * stacks / rec.stacks
-			end
-			if not copies or copies < 1 then copies = 1 end
-			rate = rate / copies
+			rate = rate * stacks
 			local from = now
 			if rec and rec.last and rec.last <= now and now - rec.last < DOT_BREAK then from = rec.last end
 			local duration = Num(effect.duration)
@@ -2800,115 +2895,129 @@ do
 			return rate * span
 		end
 
-		DebugReport = function(bosses, guardians)
-			if not dotDebug.on then return end
-			local real = GetTime()
-			local span = real - dotDebug.clock
-			if span < DEBUG_EVERY then return end
-			dotDebug.clock = real
-			local label, c
-			for label, c in pairs(dotDebug.counts) do
-				if c.hit + c.proc + c.noUnit + c.noDebuff > 0 then
-					Say(string.format("feed %s: %d ticks (%d crits) %.0f dmg, %d talent hits %.0f dmg, %d direct %.0f dmg; skipped %d no target, %d no debuff; meter factor %s",
-						label, c.hit, c.crit, c.sum, c.proc, c.procSum, c.direct, c.directSum, c.noUnit, c.noDebuff,
-						calib[label] and string.format("%.2f", calib[label]) or "-"))
-				end
-			end
-			dotDebug.counts = {}
-			local meter = {}
-			local lines = AZS_GetBossMeter and AZS_GetBossMeter()
-			local i
-			for i = 1, Count(lines) do
-				local line = lines[i]
-				if type(line) == "table" and type(line.name) == "string" and Num(line.dmg) then meter[line.name] = line.dmg end
-			end
-			local units = {}
-			for i = 1, Count(bosses) do tinsert(units, bosses[i]) end
-			for i = 1, Count(guardians) do
-				local g = guardians[i]
-				if type(g) == "table" and (g.awake == true or g.awake == 1) then tinsert(units, g) end
-			end
-			local u
-			for u = 1, table.getn(units) do
-				local unit = units[u]
-				if u <= 3 and type(unit) == "table" and Num(unit.id) and AZS_GetDebuffs then
-					local list = AZS_GetDebuffs(unit.id)
-					local groups, order = {}, {}
-					for i = 1, Count(list) do
-						local effect = list[i]
-						if type(effect) == "table" and type(effect.name) == "string" and effect.permanent ~= true and effect.permanent ~= 1 then
-							local g = groups[effect.name]
-							if not g then
-								g = { n = 0, stacks = 0, effects = {} }
-								groups[effect.name] = g
-								tinsert(order, effect.name)
-							end
-							g.n = g.n + 1
-							g.stacks = g.stacks + (Num(effect.stacks) or 1)
-							tinsert(g.effects, effect)
-							local left = Num(effect.remaining)
-							if left and (not g.left or left > g.left) then g.left = left end
-							if Num(effect.duration) then g.dur = effect.duration end
+		-- Effects on the current target: AZS_GetDebuffs when the game sends them
+		-- (bosses and guardians), otherwise UnitDebuff icons matched to your DoT
+		-- tooltips, with remaining time tracked from cast / stack changes.
+		-- Talent DoTs (no bar tooltip) are included when that option is on.
+		local function TargetEffects(unit)
+			local effects = {}
+			local have = {}
+			if AZS_GetDebuffs and Num(unit.id) then
+				local list = AZS_GetDebuffs(unit.id)
+				local i
+				for i = 1, Count(list) do
+					local effect = list[i]
+					if type(effect) == "table" and type(effect.name) == "string" and effect.permanent ~= true and effect.permanent ~= 1 then
+						local left = Num(effect.remaining)
+						local tip = TipFor(effect)
+						if left and left > 0 and (tip or On("dottalent")) then
+							tinsert(effects, effect)
+							have[effect.name] = true
+							if not tip and Num(effect.duration) then talentDurations[effect.name] = effect.duration end
 						end
-					end
-					local o
-					for o = 1, table.getn(order) do
-						local name = order[o]
-						local g = groups[name]
-						local ests = {}
-						local e
-						for mode = 1, 5 do
-							local est = 0
-							for e = 1, table.getn(g.effects) do
-								est = est + (EffectEstimate(unit, g.effects[e], g.n, mode) or 0)
-							end
-							local mark = ""
-							if mode == DotMode() then mark = "*" end
-							tinsert(ests, string.format("v%d%s %.0f", mode, mark, est))
-						end
-						local rec = dotUnits[unit.id] and dotUnits[unit.id][name]
-						local kept = 0
-						local feed
-						if rec then
-							kept = table.getn(rec.hits)
-							feed = DotRate(rec)
-						end
-						local used, _, _, procs = UnitRate(unit, name, DotNow(), DotMode())
-						local meterRate
-						if meter[name] and dotDebug.meter[name] and meter[name] >= dotDebug.meter[name] then
-							meterRate = (meter[name] - dotDebug.meter[name]) / span
-						end
-						local spell = dotSpells[name]
-						Say(string.format("%s / %s: %d entries, %d stacks, %.1fs left of %s, %d ticks kept, ticks %s/s + talent %.0f/s = %s/s, meter %s/s factor %s, tick %s every %s; estimates %s",
-							tostring(unit.name), name, g.n, g.stacks, g.left or -1, g.dur and string.format("%.1fs", g.dur) or "?",
-							kept, feed and string.format("%.0f", feed) or "-",
-							procs or 0, used and string.format("%.0f", used) or "-", meterRate and string.format("%.0f", meterRate) or "-",
-							calib[name] and string.format("%.2f", calib[name]) or "-",
-							spell and spell.dmg and string.format("%.0f", spell.dmg) or "-",
-							spell and spell.interval and string.format("%.1fs", spell.interval) or "-",
-							table.concat(ests, ", ")))
 					end
 				end
 			end
-			dotDebug.meter = meter
+			if table.getn(effects) > 0 and not On("dottalent") then return effects end
+			if table.getn(effects) > 0 and AZS_GetDebuffs then
+				-- Boss/guardian list is enough; still merge tick-only talent auras below if needed.
+			elseif not UnitDebuff then
+				return effects
+			else
+				local now = DotNow()
+				local seen = {}
+				local i = 1
+				while i <= 32 do
+					local texture, stacks = UnitDebuff("target", i)
+					if not texture then break end
+					stacks = Num(stacks) or 1
+					if stacks < 1 then stacks = 1 end
+					local tip = dotTipIcons[texture]
+					if tip and tip.name and tip.secs then
+						local old = targetAuras[unit.id] and targetAuras[unit.id][tip.name]
+						local ends
+						if old and old.ends and old.ends > now and Num(old.stacks) == stacks then
+							ends = old.ends
+						else
+							ends = now + tip.secs
+						end
+						seen[tip.name] = { ends = ends, stacks = stacks, duration = tip.secs, icon = texture, spell = tip.spell }
+					end
+					i = i + 1
+				end
+				if On("dottalent") and targetAuras[unit.id] then
+					local name, info
+					for name, info in pairs(targetAuras[unit.id]) do
+						if not seen[name] and not dotTips[name] and info.ends and info.ends > now then
+							seen[name] = info
+						end
+					end
+				end
+				targetAuras[unit.id] = seen
+				local name, info
+				for name, info in pairs(seen) do
+					if not have[name] then
+						local left = info.ends - now
+						if left > 0 then
+							tinsert(effects, { name = name, stacks = info.stacks, remaining = left, duration = info.duration, icon = info.icon, spell = info.spell })
+							have[name] = true
+						end
+					end
+				end
+			end
+			if On("dottalent") and dotUnits[unit.id] then
+				local now = DotNow()
+				local name, rec
+				for name, rec in pairs(dotUnits[unit.id]) do
+					if not have[name] and not dotTips[name] and rec.last and now - rec.last < DOT_BREAK then
+						local aura = targetAuras[unit.id] and targetAuras[unit.id][name]
+						local left = aura and (aura.ends - now) or nil
+						local stacks = aura and aura.stacks or 1
+						local dur = aura and aura.duration or talentDurations[name]
+						if left and left > 0 then
+							tinsert(effects, { name = name, stacks = stacks, remaining = left, duration = dur })
+							have[name] = true
+						end
+					end
+				end
+			end
+			return effects
 		end
 
-		DotDebug = function()
-			dotDebug.on = not dotDebug.on
-			dotDebug.clock = GetTime()
-			dotDebug.counts = {}
-			dotDebug.sampled = {}
-			dotDebug.meter = {}
-			if dotDebug.on then
-				Say("DoT debug on. Every 3 seconds it prints ticks, talent hits, the boss meter, and each history version (* is in use). /cc dotdebug again stops it.")
-				if not On("dotestimate") then Say("Turn on DoT damage on boss bars in the Experimental tab first, or nothing is read.") end
-			else
-				Say("DoT debug off.")
+		TargetDotSum = function()
+			if not On("dottarget") then return end
+			if not UnitExists or not UnitExists("target") then return end
+			if UnitIsDead and UnitIsDead("target") then return end
+			if UnitCanAttack and not UnitCanAttack("player", "target") then return end
+			local hp = Num(UnitHealth("target"))
+			local hpm = Num(UnitHealthMax("target"))
+			if not hp or not hpm or hpm <= 0 then return end
+			local id, name
+			if type(AZS_TARGET) == "table" then
+				id = Num(AZS_TARGET.id)
+				name = AZS_TARGET.name
 			end
+			if type(name) ~= "string" or name == "" then name = UnitName("target") end
+			if not id then return 0, hp, hpm end
+			local unit = { id = id, name = name, hp = hp, hpm = hpm }
+			local effects = TargetEffects(unit)
+			local load = {}
+			local i
+			for i = 1, table.getn(effects) do
+				local effect = effects[i]
+				load[effect.name] = (load[effect.name] or 0) + (Num(effect.stacks) or 1)
+			end
+			dotLoad[id] = load
+			local total = 0
+			for i = 1, table.getn(effects) do
+				total = total + (EffectEstimate(unit, effects[i]) or 0)
+			end
+			return total, hp, hpm
 		end
-		return LearnDots, EffectEstimate, DotDebug
+
+		return LearnDots, EffectEstimate, TargetDotSum
 	end
-	LearnDots, EffectEstimate, DotDebug = BuildDots()
+	LearnDots, EffectEstimate, TargetDotSum = BuildDots()
 end
 local function PaintIcon(icon, effect, est)
 	icon.tex:SetTexture(effect.icon)
@@ -3003,15 +3112,10 @@ local function UpdateDebuffs(dt)
 			CollectEffects(unit, effects)
 			local count = table.getn(effects)
 			local dot = 0
-			local copies = {}
 			local ests = {}
 			local e
 			for e = 1, count do
-				local label = effects[e].name
-				if type(label) == "string" then copies[label] = (copies[label] or 0) + 1 end
-			end
-			for e = 1, count do
-				local est = EffectEstimate(unit, effects[e], copies[effects[e].name])
+				local est = EffectEstimate(unit, effects[e])
 				ests[e] = est
 				if est and est > 0 then dot = dot + est end
 			end
@@ -3885,17 +3989,11 @@ local optionKeys = {
 	{ key = "itemtips", label = "Enable item tooltips", tip = "Tooltip on the item icons beside the boss list.|Turn this off to hide those.|The armory always keeps its tooltips.|Tips in this options window always stay." },
 	{ header = "Positions", col = 2 },
 	{ key = "locked", label = "Lock positions" },
-	{ header = "Experimental", col = 1, tab = 2 },
-	{ key = "dotestimate", label = "DoT damage on boss bars", tip = "The orange length is the damage your damage-over-time effects should still deal before they run out.|The numbers below are the estimate versions from this chat's history, in order.|Version 2 is the default: the first rewrite, which felt best.|/cc dotdebug prints every version side by side." },
-	{ choice = "dotmode", label = "Estimate version", count = 5, default = 2,
-		names = { "Original", "First rewrite", "Meter calibrated", "Meter + talent", "Rewrite + talent" },
-		tips = {
-			"The estimate before this chat's rewrite.|Average non-crit tick per stack, times stacks, times how many ticks are left.|Uses the measured time between ticks.|Often jumped up and down with the red health.",
-			"The first rewrite from this chat, the one that felt best.|Damage per second from this DoT's ticks on that boss over the last 6 seconds, times the seconds left.|Talent hits are left out.|Crits and haste are in the rate. Settles after the first ticks.",
-			"Same as version 2, then scaled to the boss damage meter.|Tries to fix missing stacks in the combat feed.|Needs a few seconds of meter data. Can start large, then settle.",
-			"Version 3 plus talent hits a DoT tick sets off, like Shadowy Weaving.|Those hits are added into this DoT's remaining damage.|On high-health bosses the talent part can dwarf the tick itself.",
-			"Version 2 plus talent hits, with no meter correction.|What we had just before the multi-version options.|Talent hits count; the boss meter does not scale the rate."
-		} },
+	{ header = "DoT damage", col = 1, tab = 2 },
+	{ key = "dotestimate", label = "DoT damage on boss bars", tip = "The yellow length is the damage your damage-over-time effects should still deal before they run out.|One stack deals what the spell's tooltip says, every stack counts, and DoT haste adds ticks without shortening the DoT.|Spell tooltips are re-read after a level-up, cache, or jewelry pick, and every 8 seconds for buffs.|The last tick seen on that boss sets when the number drops.|Talent hits, like Shadow Weaving, are not DoT damage and are left out." },
+	{ key = "dottarget", label = "DoT damage on target frame", tip = "The same yellow estimate on the target's health bar.|Bosses and guardians use the game's debuff times.|Other enemies match your DoTs by icon and time them from the cast.|Spell tooltips are re-read after a level-up, cache, or jewelry pick, and every 8 seconds for buffs.|Independent of DoT damage on boss bars." },
+	{ key = "dottalent", label = "Talent DoTs from ticks", tip = "Also estimates talent DoTs like Ignite from their ticks on the enemy.|These have no spell tooltip, so the rate comes from combat after a few ticks.|Turn on DoT damage on boss bars and/or the target frame to show it.|Talent hits that are not DoTs, like Shadow Weaving, are still left out." },
+	{ header = "Other", col = 1 },
 	{ key = "nameplates", label = "Guardian and boss nameplates", tip = "Shows nameplates for guardians and bosses only.|Turn on enemy nameplates in the game options, or no plates are shown.|Other enemies are hidden while this is on.|A normal enemy with the same name as one of them still shows." },
 	{ key = "luckodds", label = "Luck and card chances", tip = "Shows your luck and the estimated chance of a Rare, Epic, or Legendary card.|It stays up before a run too, at 0% until the run begins.|Spells, rings, and trinkets share one column. Amulets are higher.|One percent is added for each level, up to 30%.|Drag the panel to move it." },
 	{ header = "Cooldown decimals", col = 1 },
@@ -5560,8 +5658,6 @@ SlashCmdList["CORECOMFORTS"] = function(msg)
 		if luckFrame and luckFrame.Place then luckFrame.Place() end
 		PlaceMinimap()
 		Say("positions restored")
-	elseif msg == "dotdebug" then
-		if DotDebug then DotDebug() end
 	else
 		ToggleOptions()
 	end
