@@ -61,9 +61,15 @@ Saves each run and compares kills per minute by class, map, difficulty, and spec
 
 ### Run list
 
-Filter by class, map, and difficulty. Switch between endless, the full run, and a mid-run snapshot, and between the average pace and the last minute. Each new run shows its date and time. The minimum length hides shorter runs, from 0 to 16 minutes.
+Filter by solo or co-op, and by class, map, and difficulty. Switch between endless, the full run, and a mid-run snapshot, and between the average pace and the last minute. Each new run shows its date and time. The minimum length hides shorter runs, from 0 to 16 minutes.
 
-![Run list, with class, map, and difficulty filters](screenshots/history.jpg)
+![Run list, with solo, class, map, and difficulty filters](screenshots/history.jpg)
+
+### Party
+
+A co-op run lists each boss fight, with every member's damage and share. The total shows each member's level and their share of the party's damage.
+
+![Party boss fights and each member's share of the damage](screenshots/history-party.png)
 
 ### Run details
 
