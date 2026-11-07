@@ -2123,9 +2123,10 @@ Coop.TalentLabel = function(points, class)
 	return names .. "  " .. SplitOf(points)
 end
 
--- Pull Equip:/upgrade lines from loadout effect sources (works for partners too).
+-- Pull Equip:/upgrade lines from loadout effect sources when the meter
+-- actually exposes them. No rank-based estimates — live tip rolls differ.
 Coop.SourceEffectText = function(sources, keys, skipKey, skipName)
-	if type(sources) ~= "table" or type(keys) ~= "table" then return "" end
+	if type(sources) ~= "table" then return "" end
 	local parts = {}
 	local seen = {}
 	local function AddPart(name)
@@ -2148,10 +2149,27 @@ Coop.SourceEffectText = function(sources, keys, skipKey, skipName)
 			AddPart(src.name)
 		end
 	end
-	local i
-	for i = 1, table.getn(keys) do Consider(keys[i]) end
+	if type(keys) == "table" then
+		local i
+		for i = 1, table.getn(keys) do Consider(keys[i]) end
+	end
+	if type(skipKey) == "string" and skipKey ~= "" then
+		local sk, src
+		for sk, src in pairs(sources) do
+			if type(src) == "table" and type(src.originSourceKeys) == "table" then
+				local oi
+				for oi = 1, table.getn(src.originSourceKeys) do
+					if src.originSourceKeys[oi] == skipKey then
+						Consider(sk)
+						break
+					end
+				end
+			end
+		end
+	end
 	if table.getn(parts) == 0 then return "" end
 	local out = parts[1]
+	local i
 	for i = 2, table.getn(parts) do
 		out = out .. " · " .. parts[i]
 	end
@@ -4558,14 +4576,13 @@ Coop.WriteMemberSections = function(Add, m, lineY)
 						row.icon = icon
 					end
 					Add(name .. "  |cffffd24a" .. tostring(math.floor(Num(row.rank))) .. "|r", 0.85, 0.9, 1, icon)
-					local upgrades = SpellTips.CleanTipBit(row.upgrades)
-					if upgrades == "" and type(row.key) == "string" and row.key ~= ""
-						and type(SpellTips.upgrades) == "table" then
-						upgrades = SpellTips.CleanTipBit(SpellTips.upgrades[row.key])
-					end
-					if upgrades ~= "" then
-						-- |cff so color sticks (SetTextColor alone reads too close to the name).
-						Add("  |cff7a9eb8Upgrades: " .. upgrades .. "|r", 1, 1, 1)
+					-- Party skips your tip upgrades (same as Details). Partners only
+					-- if the meter saved real prose — never rank estimates.
+					if m.isLocal ~= 1 then
+						local upgrades = SpellTips.CleanTipBit(row.upgrades)
+						if upgrades ~= "" then
+							Add("  |cff7a9eb8Upgrades: " .. upgrades .. "|r", 1, 1, 1)
+						end
 					end
 				end
 			end
@@ -4591,11 +4608,14 @@ Coop.WriteMemberSections = function(Add, m, lineY)
 				line = piece.rarity .. "    " .. line
 			end
 			Add(line, 0.8, 1, 0.75, piece.icon)
-			if type(piece.stats) == "string" and piece.stats ~= "" then
+			if m.isLocal ~= 1 and type(piece.stats) == "string" and piece.stats ~= "" then
 				local stats = string.gsub(piece.stats, "|n", " · ")
 				stats = string.gsub(stats, "\n", " · ")
-				stats = SpellTips.CleanTipBit(stats)
-				Add("  |cff7a9eb8" .. stats .. "|r", 1, 1, 1)
+				stats = string.gsub(stats, "|c%x%x%x%x%x%x%x%x", "")
+				stats = string.gsub(stats, "|r", "")
+				if stats ~= "" then
+					Add("  |cff7a9eb8" .. stats .. "|r", 1, 1, 1)
+				end
 			end
 		end
 	end
@@ -4726,6 +4746,44 @@ Coop.WriteDetails = function(Add, Head, Line, Bit, rec, lineY, sheet)
 						Options.PopBar(at, hero.share, br, bg, bb, lineY[at])
 					end
 				end
+			end
+		end
+	end
+	-- Whole-run damage split (class-colored share bars).
+	local ranked = {}
+	for i = 1, table.getn(members) do
+		local m = members[i]
+		if type(m) == "table" and Num(m.dmg) > 0 then
+			tinsert(ranked, m)
+		end
+	end
+	if table.getn(ranked) > 0 then
+		table.sort(ranked, function(a, b)
+			return Num(a.dmg) > Num(b.dmg)
+		end)
+		local partyTotal = Num(co.partyDmg)
+		if partyTotal <= 0 then
+			for i = 1, table.getn(ranked) do
+				partyTotal = partyTotal + Num(ranked[i].dmg)
+			end
+		end
+		Head("Total damage")
+		Line(Bit("Party damage", Short(partyTotal), "ffb040"))
+		for i = 1, table.getn(ranked) do
+			local m = ranked[i]
+			local share = Num(m.share)
+			if share <= 0 and partyTotal > 0 then
+				share = Num(m.dmg) / partyTotal
+			end
+			local br, bg, bb = Coop.ClassRGB(m.class, shades[m.id] or 0)
+			local hex = Coop.HexRGB(br, bg, bb)
+			local tag = m.name or "?"
+			if m.isLocal == 1 then tag = tag .. " (you)" end
+			local at = Add(
+				"|cff" .. hex .. tag .. "|r  " .. Short(m.dmg) .. "  " .. Pct(share),
+				0.9, 0.88, 0.8)
+			if at and Options.PopBar and type(lineY) == "table" then
+				Options.PopBar(at, share, br, bg, bb, lineY[at])
 			end
 		end
 	end
@@ -5167,6 +5225,7 @@ local function OpenBuild(btn)
 	popTitle:SetText(title)
 	pop.rec = btn.rec
 	pop.view = btn
+	pop.partyOnly = btn.partyOnly
 	pop.detailsKey = Options.DetailsKey(btn)
 	if btn.rec and btn.rec.open == 1 and btn.partyOnly ~= 1 then ApplyLastGraphs(sheet, btn.rec) end
 	-- Use pop.* only — OpenBuild is at the 32-upvalue ceiling (no statBtn / Coop).
@@ -7364,10 +7423,20 @@ end
 
 local function SyncPop(rec)
 	if not rec or not pop or not pop:IsShown() or pop.rec ~= rec then return end
+	local partyOnly = nil
+	if pop.partyOnly == 1 or (pop.view and pop.view.partyOnly == 1) then
+		partyOnly = 1
+	end
 	local sheet = rec.atEnd or rec.preview
+	-- Party on a mid-run mark must keep that mark's frozen sheet.co.
+	if partyOnly == 1 and pop.view and type(pop.view.sheet) == "table" then
+		sheet = pop.view.sheet
+	end
 	if type(sheet) ~= "table" then return end
-	if type(sheet.spells) == "table" then SpellTips.Apply(sheet.spells) end
-	if type(sheet.jewelry) == "table" then sheet.jewelry = LatestJewels(sheet.jewelry) end
+	if partyOnly ~= 1 then
+		if type(sheet.spells) == "table" then SpellTips.Apply(sheet.spells) end
+		if type(sheet.jewelry) == "table" then sheet.jewelry = LatestJewels(sheet.jewelry) end
+	end
 	if popScroll and popScroll.GetVerticalScroll then
 		pop.scrollAt = popScroll:GetVerticalScroll()
 	end
@@ -7376,6 +7445,7 @@ local function SyncPop(rec)
 		sheet = sheet,
 		race = (type(rec.rname) == "string" and rec.rname ~= "" and rec.rname) or rec.race or "",
 		rec = rec,
+		partyOnly = partyOnly,
 	})
 end
 
