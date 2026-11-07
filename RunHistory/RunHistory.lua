@@ -1866,6 +1866,28 @@ Coop.PartyRaceByName = function(name)
 	return ""
 end
 
+Coop.PartyLevelByName = function(name)
+	if type(name) ~= "string" or name == "" or not UnitName or not UnitLevel then return 0 end
+	local me = UnitName("player")
+	if me == name then
+		-- Run level beats character level when AZS_RUN is live.
+		if type(AZS_RUN) == "table" and Num(AZS_RUN.lvl) > 0 then
+			return math.floor(Num(AZS_RUN.lvl))
+		end
+		return math.floor(Num(UnitLevel("player")))
+	end
+	if not GetNumPartyMembers then return 0 end
+	local n = GetNumPartyMembers() or 0
+	local i
+	for i = 1, n do
+		local unit = "party" .. i
+		if UnitName(unit) == name then
+			return math.floor(Num(UnitLevel(unit)))
+		end
+	end
+	return 0
+end
+
 -- Meter treeKey is 0-based. Old saves sometimes kept "0" unresolved and mapped
 -- 1/2 with a 1-based TabKey (holy/protection) — those names need a +1 shift.
 Coop.TabKey = function(tab, class)
@@ -2410,7 +2432,7 @@ Coop.CaptureRoster = function(rec, t)
 		if not m then
 			m = {
 				id = id, name = name or "?", class = class or "", race = "",
-				isLocal = nil,
+				lvl = 0, isLocal = nil,
 				joinedAt = Num(t), leftAt = nil,
 				dmg = 0, dps = 0, share = 0, top = "", topdps = 0,
 				healDone = 0, healRecv = 0, downs = 0, revives = 0,
@@ -2425,6 +2447,13 @@ Coop.CaptureRoster = function(rec, t)
 			m.race = Coop.PartyRaceByName(m.name)
 		end
 		if id == co.localId or (me and m.name == me) then m.isLocal = 1 end
+		-- Level: AZS_RUN for you, UnitLevel for present party mates.
+		if m.isLocal == 1 and type(AZS_RUN) == "table" and Num(AZS_RUN.lvl) > 0 then
+			m.lvl = math.floor(Num(AZS_RUN.lvl))
+		elseif type(m.name) == "string" and m.name ~= "" then
+			local liveLvl = Coop.PartyLevelByName(m.name)
+			if liveLvl > 0 then m.lvl = liveLvl end
+		end
 		if dmg ~= nil then m.dmg = Num(dmg) end
 		if dps ~= nil then m.dps = Num(dps) end
 		if share ~= nil then m.share = Num(share) end
@@ -4516,7 +4545,15 @@ Coop.NameTag = function(m, shades)
 	local r, g, b = Coop.ClassRGB(m.class, shade)
 	local hex = Coop.HexRGB(r, g, b)
 	local className = ClassName(m.class)
-	return "|cff" .. hex .. name .. tag .. "|r  |cff" .. hex .. className .. "|r", r, g, b, hex
+	local lvl = math.floor(Num(m.lvl))
+	if lvl <= 0 and type(m.name) == "string" then
+		lvl = Coop.PartyLevelByName(m.name)
+	end
+	local lvlBit = ""
+	if lvl > 0 then
+		lvlBit = "  |cffbfc4c8lvl " .. tostring(lvl) .. "|r"
+	end
+	return "|cff" .. hex .. name .. tag .. "|r  |cff" .. hex .. className .. "|r" .. lvlBit, r, g, b, hex
 end
 
 Coop.WithText = function(rec)
@@ -4779,8 +4816,11 @@ Coop.WriteDetails = function(Add, Head, Line, Bit, rec, lineY, sheet)
 			local hex = Coop.HexRGB(br, bg, bb)
 			local tag = m.name or "?"
 			if m.isLocal == 1 then tag = tag .. " (you)" end
+			local lvl = math.floor(Num(m.lvl))
+			local lvlBit = ""
+			if lvl > 0 then lvlBit = "  |cffbfc4c8lvl " .. tostring(lvl) .. "|r" end
 			local at = Add(
-				"|cff" .. hex .. tag .. "|r  " .. Short(m.dmg) .. "  " .. Pct(share),
+				"|cff" .. hex .. tag .. "|r" .. lvlBit .. "  " .. Short(m.dmg) .. "  " .. Pct(share),
 				0.9, 0.88, 0.8)
 			if at and Options.PopBar and type(lineY) == "table" then
 				Options.PopBar(at, share, br, bg, bb, lineY[at])
@@ -5365,6 +5405,17 @@ local function OpenBuild(btn)
 			popSlider.busy = nil
 		end
 		if popScroll then popScroll:SetVerticalScroll(0) end
+		-- Live SyncPop saves scrollAt; restore it so Party does not jump to top.
+		if pop.scrollAt and popScroll and popSlider then
+			local sy = pop.scrollAt
+			pop.scrollAt = nil
+			if sy < 0 then sy = 0 end
+			if sy > maxScroll then sy = maxScroll end
+			popSlider.busy = 1
+			popSlider:SetValue(sy)
+			popSlider.busy = nil
+			popScroll:SetVerticalScroll(sy)
+		end
 		if frame then
 			pop:ClearAllPoints()
 			pop:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
