@@ -518,6 +518,19 @@ local function CanAffordCache()
 	return CachesAffordable(gold, cost) >= 1
 end
 
+local function BuyableOnMap()
+	local gold, cost = 0, 0
+	local run = AZS_RUN
+	if type(run) == "table" then
+		gold = Num(run.gold) or 0
+		cost = Num(run.chest) or 0
+	end
+	local affordable = CachesAffordable(gold, cost)
+	local onMap = Count(Chests())
+	if onMap < affordable then return onMap end
+	return affordable
+end
+
 local function ShowCacheArrow()
 	if not On("cachearrow") then return false end
 	if not On("cacheafford") then return true end
@@ -2127,11 +2140,12 @@ local function EnsureGuides()
 	RestoreGuide(guides.cache)
 end
 
-local function StyleGuide(guide, pending)
+local function StyleGuide(guide, pending, side, alive, cache)
 	local br, bg, bb, ba = 0.85, 0.75, 0.4, 0.55
 	local cr, cg, cb = 0.93, 0.8, 0.53
 	local dr, dg, db = 1, 0.96, 0.85
 	local ar, ag, ab = 1, 1, 1
+	local fill = 0.45
 	if not guide.named then
 		dr, dg, db = 1, 0.9, 0.6
 	end
@@ -2140,14 +2154,41 @@ local function StyleGuide(guide, pending)
 		cr, cg, cb = 0.55, 0.86, 1
 		dr, dg, db = 0.7, 0.9, 1
 		ar, ag, ab = 0.45, 0.82, 1
+	elseif alive then
+		br, bg, bb, ba = 1, 0.72, 0.08, 1
+		cr, cg, cb = 1, 0.88, 0.22
+		dr, dg, db = 1, 0.95, 0.6
+		ar, ag, ab = 1, 0.78, 0.05
+		fill = 0.78
+	elseif cache then
+		br, bg, bb, ba = 0.86, 0.55, 0.24, 1
+		cr, cg, cb = 0.95, 0.74, 0.42
+		dr, dg, db = 1, 0.86, 0.62
+		fill = 0.78
+	end
+	local arrowR, arrowG, arrowB = ar, ag, ab
+	if cache and not pending and not alive then
+		arrowR, arrowG, arrowB = 0.95, 0.7, 0.38
 	end
 	guide:SetBackdropBorderColor(br, bg, bb, ba)
+	if alive then
+		guide:SetBackdropColor(0.18, 0.1, 0.02, fill)
+	elseif cache then
+		guide:SetBackdropColor(0.16, 0.08, 0.03, fill)
+	else
+		guide:SetBackdropColor(0, 0, 0, fill)
+	end
 	if guide.icon then guide.icon:SetVertexColor(ar, ag, ab) end
-	if guide.arrow then guide.arrow:SetVertexColor(ar, ag, ab) end
+	if guide.arrow then
+		guide.arrow:SetWidth(28)
+		guide.arrow:SetHeight(28)
+		guide.arrow:SetVertexColor(arrowR, arrowG, arrowB)
+	end
 	if guide.caption then guide.caption:SetTextColor(cr, cg, cb) end
 	if guide.dist then guide.dist:SetTextColor(dr, dg, db) end
+	local showSide = pending or side or alive
 	if guide.timer then
-		if pending then
+		if showSide then
 			guide.timer:Show()
 		else
 			guide.timer:Hide()
@@ -2155,10 +2196,12 @@ local function StyleGuide(guide, pending)
 	end
 	if guide.baseWidth then
 		local extra = 0
-		if pending and guide.timer then
-			extra = 40
+		if showSide and guide.timer then
+			extra = 22
+			if pending then extra = 40 end
+			if alive then extra = 36 end
 			local textW = guide.timer:GetStringWidth()
-			if textW and textW + 10 > extra then extra = textW + 10 end
+			if textW and textW + 8 > extra then extra = textW + 8 end
 		end
 		guide:SetWidth(guide.baseWidth + extra)
 	end
@@ -2187,11 +2230,22 @@ local function PointGuide(guide, best)
 	if guide.timer then
 		if best.pending then
 			guide.timer:SetText(Clock(best.left or 0))
+			guide.timer:SetTextColor(0.55, 0.9, 1)
+		elseif best.buyable ~= nil then
+			guide.timer:SetText(string.format("(%.0f)", best.buyable))
+			if best.buyable < 1 then
+				guide.timer:SetTextColor(1, 0.42, 0.32)
+			else
+				guide.timer:SetTextColor(0.95, 0.74, 0.42)
+			end
+		elseif best.alive then
+			guide.timer:SetText("Alive")
+			guide.timer:SetTextColor(1, 0.9, 0.25)
 		else
 			guide.timer:SetText("")
 		end
 	end
-	StyleGuide(guide, best.pending)
+	StyleGuide(guide, best.pending, best.buyable ~= nil, best.alive, best.cache)
 	guide:Show()
 end
 
@@ -2228,7 +2282,7 @@ local function UpdateMap()
 				guides.guardian:Hide()
 			end
 			if ShowCacheArrow() and guides.cache then
-				PointGuide(guides.cache, { east = 0, north = 1, yards = 0 })
+				PointGuide(guides.cache, { east = 0, north = 1, yards = 0, cache = true })
 			elseif guides.cache then
 				guides.cache:Hide()
 			end
@@ -2320,13 +2374,22 @@ local function UpdateMap()
 	if On("guardarrow") or On("cachearrow") then EnsureGuides() end
 	if guides.guardian then
 		local guardTarget = nearestGuard
+		if guardTarget then guardTarget.alive = true end
 		if not guardTarget and not anyLiving and On("guardspawn") then
 			guardTarget = nextSpawn
 		end
 		if On("guardarrow") then PointGuide(guides.guardian, guardTarget) else guides.guardian:Hide() end
 	end
 	if guides.cache then
-		if ShowCacheArrow() then PointGuide(guides.cache, nearestCache) else guides.cache:Hide() end
+		if ShowCacheArrow() then
+			if nearestCache then nearestCache.cache = true end
+			if nearestCache and On("cacheopen") then
+				nearestCache.buyable = BuyableOnMap()
+			end
+			PointGuide(guides.cache, nearestCache)
+		else
+			guides.cache:Hide()
+		end
 	end
 end
 
@@ -4690,10 +4753,11 @@ local optionKeys = {
 	{ edit = "pintimer", label = "Boss countdown", min = 0, max = 180, default = 30, tip = "A waiting boss icon shows the seconds left once it is inside this number.|0 hides the countdown.|180 is three minutes." },
 	{ key = "cachepins", label = "Cache icons" },
 	{ header = "Direction arrows", col = 1 },
-	{ key = "guardarrow", label = "Boss arrow", tip = "Points at the closest boss that is still waiting.|A boss already in combat is left off, since it leaves its spawn." },
+	{ key = "guardarrow", label = "Boss arrow", tip = "Points at the closest boss that is still waiting.|A boss already in combat is left off, since it leaves its spawn.|A living guardian is bright gold, with Alive beside the arrow." },
 	{ key = "guardspawn", parent = "guardarrow", label = "Point at the next spawn", tip = "When every guardian is dead, the arrow points at the lair that fills first.|If several fill at the same time, it points at the closest of those.|The arrow turns blue and a timer sits beside it." },
 	{ key = "cachearrow", label = "Cache arrow" },
 	{ key = "cacheafford", parent = "cachearrow", label = "Only when you can afford one", tip = "Hides the cache arrow until your gold can pay for a cache.|That is the same number as Caches you can buy.|Turn this off to point at a cache even when you cannot buy it yet." },
+	{ key = "cacheopen", parent = "cachearrow", label = "How many you can open", tip = "Shows how many caches you can open right now, beside the arrow.|Your gold may pay for more than are on the map, or the map may have more than you can pay for.|The number is whichever of those is smaller.|(0) is red." },
 	{ header = "UI", col = 2, tab = 1 },
 	{ key = "counter", label = "Kills, gold, and cache" },
 	{ key = "cachecount", label = "Caches you can buy", tip = "Adds (3) after the cache price.|That number is how many caches your gold can pay for right now.|Each one costs more than the last, so 100 gold at 20 buys 3.|While this is off, the bar shows the price only." },
