@@ -53,6 +53,10 @@ local CFG = {
 		{ key = "aq", name = "Gates of Ahn'Qiraj" },
 		{ key = "naxx", name = "Naxxramas" },
 	},
+	-- Co-op capture cadence and caps (saved on rec.co).
+	COOP_CAPTURE = 15,
+	COOP_EVENTS_MAX = 40,
+	COOP_FIGHTS_MAX = 24,
 }
 
 local TREE_ORDER = {
@@ -89,11 +93,12 @@ local COLS = {
 	{ key = "xpm", text = "XP/min", x = 444, w = 50 },
 	{ key = "gpm", text = "G/min", x = 498, w = 46 },
 	{ key = "dps", text = "DPS", x = 548, w = 52 },
-	{ key = "bosses", text = "Boss", x = 604, w = 36 },
-	{ key = "guardians", text = "Guard", x = 644, w = 42 },
-	{ key = "elites", text = "Elite", x = 690, w = 40 },
-	{ key = "lvl", text = "Lvl", x = 734, w = 28 },
-	{ key = "race", text = "Race", x = 766, w = 52 },
+	{ key = "bosses", text = "Boss", x = 590, w = 34 },
+	{ key = "guardians", text = "Guard", x = 628, w = 38 },
+	{ key = "elites", text = "Elite", x = 670, w = 34 },
+	{ key = "lvl", text = "Lvl", x = 708, w = 24 },
+	-- Leaves room for X / Party / Details on the right in co-op rows.
+	{ key = "race", text = "Race", x = 734, w = 40 },
 }
 
 local ready = false
@@ -104,7 +109,7 @@ local anchorCache = nil
 local anchorAt = 0
 
 local frame, sub, headers, rows, foot, prevBtn, nextBtn, pageText
-local mapBtn, diffBtn, classBtn, diffMenu
+local mapBtn, diffBtn, classBtn, diffMenu, modeBtn
 local pop, popTitle, popScroll, popChild, popSlider, statBtn
 local PlaceDetails
 local PlaceWindow
@@ -128,6 +133,7 @@ local lastOwed = 0
 -- Tables hold helpers so the chunk stays under Lua 5.0's 200 locals.
 local Window = {}
 local Options = {}
+local Coop = {}
 
 local function Say(msg)
 	if DEFAULT_CHAT_FRAME then
@@ -192,6 +198,18 @@ Options.ApplyDefaults = function()
 	else
 		RunStatsDB.lastMin = nil
 	end
+	-- Solo / Co-op list: Auto follows whether you are in a party right now.
+	if RunStatsDB.defMode == "solo" then
+		RunStatsDB.coopView = nil
+	elseif RunStatsDB.defMode == "coop" then
+		RunStatsDB.coopView = 1
+	else
+		if Coop.LiveParty and Coop.LiveParty() then
+			RunStatsDB.coopView = 1
+		else
+			RunStatsDB.coopView = nil
+		end
+	end
 	RunStatsDB.allClasses = nil
 	RunStatsDB.allMaps = nil
 end
@@ -214,6 +232,9 @@ local function InitDB()
 	if RunStatsDB.defMap ~= "all" then RunStatsDB.defMap = "current" end
 	if RunStatsDB.defDiff ~= "any" then RunStatsDB.defDiff = "current" end
 	if RunStatsDB.defPace ~= "last" then RunStatsDB.defPace = "average" end
+	if RunStatsDB.defMode ~= "solo" and RunStatsDB.defMode ~= "coop" then
+		RunStatsDB.defMode = "auto"
+	end
 	if RunStatsDB.defWindow == nil then
 		if RunStatsDB.full == 1 then
 			RunStatsDB.defWindow = "endless"
@@ -1386,27 +1407,22 @@ local function ReadBuild(id, class)
 	local talents = {}
 	local spells = {}
 	local jewelry = {}
+	local points = {}
 	if mid then
 		local ok, loadout = pcall(AZS_GetMeterLoadout, { apiVersion = 1, runId = mid })
 		if ok and type(loadout) == "table" then
 			sources = loadout.sources
-			Each(loadout.talents, function(row)
-				if type(row) == "table" then
-					local rank = Num(row.rank)
-					if rank > 0 then
-						local key = TreeKeyOf(row.treeKey, class)
-						if key == "" then key = TreeKeyOf(row.sourceKey, class) end
-						local name = SourceName(sources, row.sourceKey) or Pretty(key)
-						if name == "" then name = "?" end
-						tinsert(talents, {
-							tree = key,
-							name = name,
-							rank = rank,
-							key = type(row.sourceKey) == "string" and row.sourceKey or "",
-						})
-					end
+			-- CompactBuild keeps numeric treeKey and remaps 0-based trees correctly.
+			if type(Coop.CompactBuild) == "function" then
+				local built = Coop.CompactBuild(loadout, class)
+				if type(Coop.RefreshPoints) == "function" then
+					Coop.RefreshPoints(built, class, true)
 				end
-			end)
+				if type(built) == "table" then
+					if type(built.talents) == "table" then talents = built.talents end
+					if type(built.points) == "table" then points = built.points end
+				end
+			end
 			Each(loadout.abilities, function(row)
 				if type(row) == "table" then
 					local rank = Num(row.rank)
@@ -1454,13 +1470,24 @@ local function ReadBuild(id, class)
 			end)
 		end
 	end
-	local frameBuild = ReadTalentFrame(class)
-	local points = {}
+	-- AZS talent-frame API is a stub (often 1/1/0). Prefer meter ranks.
 	local armory = nil
-	if frameBuild then
-		points = frameBuild.points
+	local meterPts = 0
+	if type(Coop.PointsTotal) == "function" then
+		meterPts = Coop.PointsTotal(points)
+	end
+	if meterPts > 0 then
 		armory = 1
-		if table.getn(frameBuild.talents) > 0 then talents = frameBuild.talents end
+	else
+		local frameBuild = ReadTalentFrame(class)
+		if frameBuild then
+			points = frameBuild.points
+			armory = 1
+			if table.getn(talents) == 0 and type(frameBuild.talents) == "table"
+				and table.getn(frameBuild.talents) > 0 then
+				talents = frameBuild.talents
+			end
+		end
 	end
 	local worn = ReadWorn()
 	local w
@@ -1763,11 +1790,1170 @@ local function FillIdentity(rec)
 end
 
 local function NoteParty(rec)
-	if rec.party == 1 or not AZS_GetMeterContext then return end
+	-- Sticky once a run has been in a party: stay marked even if friends leave.
+	if not rec or rec.party == 1 or not AZS_GetMeterContext then return end
 	local ok, ctx = pcall(AZS_GetMeterContext)
 	if ok and type(ctx) == "table" and type(ctx.partyState) == "string" and ctx.partyState ~= "solo" then
 		rec.party = 1
 	end
+end
+
+-- Co-op helpers. Lives on Coop so the chunk stays under Lua 5.0's 200 locals.
+Coop.LiveParty = function()
+	if not AZS_GetMeterContext then return false end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" then return false end
+	return type(ctx.partyState) == "string" and ctx.partyState ~= "solo"
+end
+
+Coop.ViewMode = function()
+	if RunStatsDB and RunStatsDB.coopView == 1 then return "coop" end
+	return "solo"
+end
+
+Coop.Match = function(rec)
+	if not rec then return false end
+	if Coop.ViewMode() == "coop" then return rec.party == 1 end
+	return rec.party ~= 1
+end
+
+Coop.Label = function()
+	if Coop.ViewMode() == "coop" then return "Co-op" end
+	return "Solo"
+end
+
+Coop.Ensure = function(rec)
+	if type(rec.co) ~= "table" then
+		rec.co = {
+			size = 0, maxSize = 0, partyId = "", hostId = "", localId = "",
+			members = {}, fights = {}, events = {},
+			partyDmg = 0, partyHeal = 0,
+		}
+	end
+	if type(rec.co.members) ~= "table" then rec.co.members = {} end
+	if type(rec.co.fights) ~= "table" then rec.co.fights = {} end
+	if type(rec.co.events) ~= "table" then rec.co.events = {} end
+	return rec.co
+end
+
+Coop.FindMember = function(co, id)
+	if type(co) ~= "table" or type(co.members) ~= "table" or type(id) ~= "string" then return nil end
+	local i
+	for i = 1, table.getn(co.members) do
+		if co.members[i].id == id then return co.members[i] end
+	end
+end
+
+Coop.PartyRaceByName = function(name)
+	if type(name) ~= "string" or name == "" or not UnitName or not UnitRace then return "" end
+	local me = UnitName("player")
+	if me == name then
+		local r = UnitRace("player")
+		if type(r) == "string" then return r end
+		return ""
+	end
+	if not GetNumPartyMembers then return "" end
+	local n = GetNumPartyMembers() or 0
+	local i
+	for i = 1, n do
+		local unit = "party" .. i
+		if UnitName(unit) == name then
+			local r = UnitRace(unit)
+			if type(r) == "string" then return r end
+			return ""
+		end
+	end
+	return ""
+end
+
+-- Meter treeKey is 0-based. Old saves sometimes kept "0" unresolved and mapped
+-- 1/2 with a 1-based TabKey (holy/protection) — those names need a +1 shift.
+Coop.TabKey = function(tab, class)
+	local order = TREE_ORDER[class]
+	if type(order) ~= "table" then return "" end
+	tab = tonumber(tab)
+	if not tab then return "" end
+	local n = table.getn(order)
+	if tab >= 0 and tab < n then return order[tab + 1] end
+	if tab >= 1 and tab <= n then return order[tab] end
+	return ""
+end
+
+-- Observed AZS talent → tree (from meter 0-based keys). Used when old saves
+-- only kept wrong 1-based names and no numeric treeKey.
+local TALENT_ID_TREE = {
+	paladin = {
+		divine_strength = "holy", imp_seal = "holy", unyielding_faith = "holy",
+		imp_devotion = "protection", spiritual_attunement = "protection",
+		ardent_defender = "protection", blessed_life = "protection",
+		divine_intervention = "protection", hallowed_ground = "protection",
+		hammer_righteous = "protection", imp_consecration = "protection",
+		imp_hoj = "protection", judgement_crusader = "protection",
+		redoubt = "protection", righteous_fury = "protection",
+		sacred_duty = "protection", weighted_hammer = "protection",
+		art_of_war = "retribution", benediction = "retribution",
+		conviction = "retribution", deflection_pal = "retribution",
+		divine_storm = "retribution", imp_judgement = "retribution",
+		imp_might = "retribution", righteous_hammer = "retribution",
+		sanctity_aura = "retribution", seal_of_command = "retribution",
+		vindication = "retribution",
+	},
+}
+
+Coop.TreeFromTalentKey = function(key, class)
+	if type(key) ~= "string" or key == "" or type(class) ~= "string" then return "" end
+	local map = TALENT_ID_TREE[class]
+	if type(map) ~= "table" then return "" end
+	local _, _, id = string.find(key, "^talent:%w+%.(%w+)")
+	if not id then return "" end
+	return map[id] or ""
+end
+
+Coop.RawTreeValue = function(row)
+	if type(row) ~= "table" then return nil end
+	if row.treeKey ~= nil and row.treeKey ~= "" then return row.treeKey end
+	return row.tree
+end
+
+-- True when this talent list still has unresolved numeric tree keys (e.g. "0").
+Coop.HasNumericTree = function(talents)
+	if type(talents) ~= "table" then return false end
+	local i
+	for i = 1, table.getn(talents) do
+		local row = talents[i]
+		if type(row) == "table" and tonumber(Coop.RawTreeValue(row)) ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
+-- Old 1-based name → correct 0-based tree (holy→protection, protection→retribution).
+Coop.ShiftTreeName = function(name, class)
+	local order = TREE_ORDER[class]
+	if type(order) ~= "table" or type(name) ~= "string" or name == "" then return "" end
+	local key = TreeKeyOf(name, class)
+	if key == "" then key = NormKey(name) end
+	local n = table.getn(order)
+	local i
+	for i = 1, n do
+		if key == order[i] or NormKey(TREE_NAME[order[i]] or "") == NormKey(name) then
+			if i < n then return order[i + 1] end
+			return order[i]
+		end
+	end
+	return ""
+end
+
+-- Resolve a talent row to a TREE_ORDER key (holy / retribution / …).
+Coop.TalentTree = function(row, sources, class)
+	if type(row) ~= "table" or type(class) ~= "string" or class == "" then return "" end
+	local order = TREE_ORDER[class]
+	if type(order) ~= "table" then return "" end
+	local function Hit(raw)
+		if raw == nil then return "" end
+		local fromTab = Coop.TabKey(raw, class)
+		if fromTab ~= "" then return fromTab end
+		if type(raw) ~= "string" or raw == "" then return "" end
+		local key = TreeKeyOf(raw, class)
+		local i
+		for i = 1, table.getn(order) do
+			if key == order[i] then return order[i] end
+		end
+		local nice = NormKey(raw)
+		for i = 1, table.getn(order) do
+			if nice == order[i] or nice == NormKey(TREE_NAME[order[i]] or "") then
+				return order[i]
+			end
+		end
+		local low = string.lower(raw)
+		for i = 1, table.getn(order) do
+			if string.find(low, order[i], 1, true) then return order[i] end
+		end
+		local start = 1
+		local len = string.len(low)
+		while start <= len do
+			local a, b = string.find(low, "[:%./]", start)
+			local piece
+			if a then
+				piece = string.sub(low, start, a - 1)
+				start = b + 1
+			else
+				piece = string.sub(low, start)
+				start = len + 1
+			end
+			fromTab = Coop.TabKey(piece, class)
+			if fromTab ~= "" then return fromTab end
+			piece = NormKey(piece)
+			for i = 1, table.getn(order) do
+				if piece == order[i] then return order[i] end
+			end
+			if not a then break end
+		end
+		return ""
+	end
+	-- Prefer a known talent id, then numeric treeKey, then names / sources.
+	local fromId = Coop.TreeFromTalentKey(row.key or row.sourceKey, class)
+	if fromId ~= "" then return fromId end
+	local try = {
+		row.treeKey, row.tree, row.tabKey, row.tab, row.treeIndex, row.tabIndex,
+		row.sourceKey,
+	}
+	if type(sources) == "table" and type(row.sourceKey) == "string" then
+		local src = sources[row.sourceKey]
+		if type(src) == "table" then
+			tinsert(try, src.treeKey)
+			tinsert(try, src.talentKey)
+			tinsert(try, src.localizationKey)
+		end
+	end
+	local t
+	for t = 1, table.getn(try) do
+		local hit = Hit(try[t])
+		if hit ~= "" then return hit end
+	end
+	return ""
+end
+
+Coop.BuildPoints = function(talents, class)
+	local points = {}
+	if type(class) ~= "string" or class == "" or type(TREE_ORDER[class]) ~= "table" then
+		return points
+	end
+	local trees = TREE_ORDER[class]
+	local sums = {}
+	local i
+	for i = 1, table.getn(trees) do sums[trees[i]] = 0 end
+	if type(talents) == "table" then
+		for i = 1, table.getn(talents) do
+			local row = talents[i]
+			if type(row) == "table" then
+				local tree = row.tree
+				if type(tree) ~= "string" or sums[tree] == nil then
+					tree = Coop.TalentTree({
+						treeKey = row.treeKey,
+						tree = row.tree,
+						sourceKey = row.key or row.sourceKey,
+						key = row.key,
+					}, nil, class)
+				end
+				if type(tree) == "string" and sums[tree] ~= nil then
+					row.tree = tree
+					sums[tree] = sums[tree] + Num(row.rank)
+				end
+			end
+		end
+	end
+	for i = 1, table.getn(trees) do
+		local key = trees[i]
+		tinsert(points, {
+			key = key,
+			name = NiceTree(key),
+			points = sums[key] or 0,
+			order = i,
+		})
+	end
+	return points
+end
+
+Coop.PointsTotal = function(points)
+	local n = 0
+	if type(points) ~= "table" then return 0 end
+	local i
+	for i = 1, table.getn(points) do n = n + Num(points[i].points) end
+	return n
+end
+
+-- Rebuild tree splits from saved talent ranks. force=true rewrites a wrong split.
+Coop.RefreshPoints = function(build, class, force)
+	if type(build) ~= "table" then return end
+	if type(build.talents) ~= "table" or table.getn(build.talents) == 0 then return end
+	if type(class) ~= "string" or class == "" then return end
+	if not force and Coop.PointsTotal(build.points) > 0 then return end
+	local shiftNames = Coop.HasNumericTree(build.talents)
+	local i
+	for i = 1, table.getn(build.talents) do
+		local row = build.talents[i]
+		if type(row) == "table" then
+			local tree = Coop.TreeFromTalentKey(row.key, class)
+			if tree == "" then
+				local raw = Coop.RawTreeValue(row)
+				if tonumber(raw) ~= nil then
+					tree = Coop.TabKey(raw, class)
+				elseif shiftNames then
+					-- "holy"/"protection" were 1-based maps of keys 1/2.
+					tree = Coop.ShiftTreeName(tostring(raw or ""), class)
+				end
+			end
+			if tree == "" then
+				tree = Coop.TalentTree({
+					treeKey = row.treeKey,
+					tree = row.tree,
+					sourceKey = row.key or row.sourceKey,
+					key = row.key,
+				}, nil, class)
+			end
+			if tree ~= "" then
+				row.tree = tree
+				-- Keep numeric treeKey only; drop stale resolved names.
+				if tonumber(row.treeKey) == nil then row.treeKey = "" end
+			end
+		end
+	end
+	build.points = Coop.BuildPoints(build.talents, class)
+end
+
+-- Fixed tree-order label: "Holy/Protection/Retribution  12/8/31".
+Coop.TalentLabel = function(points, class)
+	if type(points) ~= "table" or table.getn(points) == 0 then return "" end
+	local names = ""
+	local i
+	if type(class) == "string" and type(TREE_ORDER[class]) == "table" then
+		local order = TREE_ORDER[class]
+		for i = 1, table.getn(order) do
+			if names ~= "" then names = names .. "/" end
+			names = names .. NiceTree(order[i])
+		end
+	else
+		for i = 1, table.getn(points) do
+			if names ~= "" then names = names .. "/" end
+			names = names .. (points[i].name or NiceTree(points[i].key) or "?")
+		end
+	end
+	return names .. "  " .. SplitOf(points)
+end
+
+-- Pull Equip:/upgrade lines from loadout effect sources (works for partners too).
+Coop.SourceEffectText = function(sources, keys, skipKey, skipName)
+	if type(sources) ~= "table" or type(keys) ~= "table" then return "" end
+	local parts = {}
+	local seen = {}
+	local function AddPart(name)
+		if type(name) ~= "string" or name == "" then return end
+		if skipName and name == skipName then return end
+		local low = string.lower(name)
+		if seen[low] then return end
+		seen[low] = 1
+		tinsert(parts, name)
+	end
+	local function Consider(key)
+		if type(key) ~= "string" or key == "" or key == skipKey then return end
+		local src = sources[key]
+		if type(src) ~= "table" then return end
+		local kind = src.kind
+		-- Pulse/empowered clones of the same ability are not upgrade text.
+		if type(src.variantKey) == "string" and src.variantKey ~= "" then return end
+		if kind == "ability" or kind == "talent" or kind == "basic_attack" then return end
+		if kind == "effect" or kind == "item" or kind == "generic" or kind == nil then
+			AddPart(src.name)
+		end
+	end
+	local i
+	for i = 1, table.getn(keys) do Consider(keys[i]) end
+	if table.getn(parts) == 0 then return "" end
+	local out = parts[1]
+	for i = 2, table.getn(parts) do
+		out = out .. " · " .. parts[i]
+	end
+	return out
+end
+
+Coop.FormatJewelStats = function(text)
+	if type(text) ~= "string" or text == "" then return "" end
+	-- Don't use CleanTipBit here — it cuts at the first |n and would drop
+	-- extra Equip lines. Only strip color codes.
+	text = string.gsub(text, "|c%x%x%x%x%x%x%x%x", "")
+	text = string.gsub(text, "|r", "")
+	text = string.gsub(text, "^%s+", "")
+	text = string.gsub(text, "%s+$", "")
+	if text == "" then return "" end
+	-- Meter effect names are often bare; Details uses "Equip: …".
+	if string.find(text, "Equip:") or string.find(text, "Use:") then
+		return text
+	end
+	local out = ""
+	local pos = 1
+	local len = string.len(text)
+	while pos <= len + 1 do
+		local a, b = string.find(text, " · ", pos, true)
+		local piece
+		if a then
+			piece = string.sub(text, pos, a - 1)
+			pos = b + 1
+		else
+			piece = string.sub(text, pos)
+			pos = len + 2
+		end
+		piece = string.gsub(piece, "^%s+", "")
+		piece = string.gsub(piece, "%s+$", "")
+		if piece ~= "" then
+			if not string.find(piece, "^Equip:") and not string.find(piece, "^Use:") then
+				piece = "Equip: " .. piece
+			end
+			if out ~= "" then out = out .. " · " end
+			out = out .. piece
+		end
+		if not a then break end
+	end
+	return out
+end
+
+Coop.CompactBuild = function(loadout, class)
+	local out = { talents = {}, spells = {}, jewelry = {}, points = {} }
+	if type(loadout) ~= "table" then return out end
+	local sources = loadout.sources
+	Each(loadout.talents, function(row)
+		if type(row) == "table" then
+			local rank = Num(row.rank)
+			if rank <= 0 then rank = Num(row.ranks) end
+			if rank <= 0 then rank = Num(row.points) end
+			if rank > 0 then
+				local key = Coop.TalentTree(row, sources, class)
+				local name = SourceName(sources, row.sourceKey) or Pretty(key)
+				if name == "" then name = "?" end
+				local rawTree = row.treeKey
+				if rawTree == nil then rawTree = row.tree end
+				-- Persist numeric meter keys only (0/1/2). Resolved names are not keys.
+				local treeKeySave = ""
+				if tonumber(rawTree) ~= nil then
+					treeKeySave = tostring(math.floor(tonumber(rawTree)))
+				end
+				if key == "" and treeKeySave ~= "" then
+					key = Coop.TabKey(treeKeySave, class)
+				end
+				tinsert(out.talents, {
+					tree = key, name = name, rank = rank,
+					key = type(row.sourceKey) == "string" and row.sourceKey or "",
+					treeKey = treeKeySave,
+				})
+			end
+		end
+	end)
+	Each(loadout.abilities, function(row)
+		if type(row) == "table" then
+			local rank = Num(row.rank)
+			local learned = Flag(row.learned) or Flag(row.selected) or rank > 0
+			if learned and rank > 0 then
+				local src = nil
+				if type(sources) == "table" and type(row.sourceKey) == "string" then
+					src = sources[row.sourceKey]
+				end
+				local name = SourceName(sources, row.sourceKey) or "?"
+				local key = ""
+				if type(src) == "table" and type(src.abilityKey) == "string" then key = src.abilityKey end
+				if not IsRacial(key, name, row.slotId) then
+					local icon = SourceIcon(sources, row.sourceKey)
+					if icon == "" then icon = SpellBarIcon(key) end
+					local effectKeys = row.effectSourceKeys
+					if type(effectKeys) ~= "table" then effectKeys = {} end
+					if type(src) == "table" and type(src.relatedSourceKeys) == "table" then
+						local rk
+						for rk = 1, table.getn(src.relatedSourceKeys) do
+							tinsert(effectKeys, src.relatedSourceKeys[rk])
+						end
+					end
+					local upgrades = Coop.SourceEffectText(sources, effectKeys, row.sourceKey, name)
+					upgrades = SpellTips.CleanTipBit(upgrades)
+					tinsert(out.spells, {
+						key = key, name = name, rank = rank,
+						icon = icon, upgrades = upgrades,
+					})
+				end
+			end
+		end
+	end)
+	Each(loadout.runJewelry, function(row)
+		if type(row) == "table" then
+			local name = SourceName(sources, row.sourceKey) or ""
+			local cat = type(row.category) == "string" and row.category or ""
+			if name == "" and type(row.sourceKey) == "string" then
+				local _, _, kind, body = string.find(row.sourceKey, "^(%a+):([^:]+)")
+				if type(body) == "string" and body ~= "" then name = Pretty(body) end
+				if cat == "" and kind == "amulet" then cat = "amulet" end
+				if cat == "" and (kind == "jewel" or kind == "ring") then cat = "ring" end
+				if cat == "" and kind == "trinket" then cat = "trinket" end
+				if name == "" then name = row.sourceKey end
+			end
+			local effectKeys = row.effectSourceKeys
+			if type(effectKeys) ~= "table" then effectKeys = {} end
+			local src = nil
+			if type(sources) == "table" and type(row.sourceKey) == "string" then
+				src = sources[row.sourceKey]
+			end
+			if type(src) == "table" and type(src.relatedSourceKeys) == "table" then
+				local rk
+				for rk = 1, table.getn(src.relatedSourceKeys) do
+					tinsert(effectKeys, src.relatedSourceKeys[rk])
+				end
+			end
+			local stats = Coop.FormatJewelStats(
+				Coop.SourceEffectText(sources, effectKeys, row.sourceKey, name))
+			tinsert(out.jewelry, {
+				category = cat, name = name,
+				key = type(row.sourceKey) == "string" and row.sourceKey or "",
+				rarity = "", icon = SourceIcon(sources, row.sourceKey),
+				stats = stats,
+			})
+		end
+	end)
+	out.points = Coop.BuildPoints(out.talents, class)
+	-- Keep talent ranks (hidden in UI) so a bad treeKey can be retried later.
+	return out
+end
+
+-- Stock AZS_GetMeter folds ranks into one name. Snapshot groupBy=source keeps
+-- each rank/sourceKey as its own row — merge by name so Party matches Details.
+Coop.MergeMeter = function(rows)
+	local out = {}
+	if type(rows) ~= "table" then return out end
+	local by = {}
+	local order = {}
+	local i
+	for i = 1, table.getn(rows) do
+		local row = rows[i]
+		if type(row) == "table" and Num(row.dmg) > 0 then
+			local name = row.name or "?"
+			local key = string.lower(name)
+			local cur = by[key]
+			if not cur then
+				cur = {
+					name = name,
+					dmg = 0,
+					dps = 0,
+					share = 0,
+					proc = 0,
+				}
+				by[key] = cur
+				tinsert(order, key)
+			end
+			cur.dmg = cur.dmg + Num(row.dmg)
+			cur.dps = cur.dps + Num(row.dps)
+			cur.share = cur.share + Num(row.share)
+			if row.proc == 1 then cur.proc = 1 end
+			-- Prefer a real display name over "?".
+			if name ~= "?" and (cur.name == "?" or cur.name == "") then cur.name = name end
+		end
+	end
+	for i = 1, table.getn(order) do tinsert(out, by[order[i]]) end
+	table.sort(out, function(a, b)
+		return Num(a.dmg) > Num(b.dmg)
+	end)
+	return out
+end
+
+Coop.Snap = function(query)
+	if not AZS_GetMeterSnapshot then return nil end
+	local ok, snap, err = pcall(AZS_GetMeterSnapshot, query)
+	if not ok then return nil end
+	if type(snap) == "table" then return snap end
+	if type(err) == "table" and err.retryable then return nil end
+	return nil
+end
+
+Coop.CaptureRoster = function(rec, t)
+	local co = Coop.Ensure(rec)
+	if not AZS_GetMeterContext then return end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" then return end
+	if type(ctx.partyId) == "string" then co.partyId = ctx.partyId end
+	if type(ctx.authorityId) == "string" then co.hostId = ctx.authorityId end
+	if type(ctx.localOwnerId) == "string" then co.localId = ctx.localOwnerId end
+	local runId = ctx.runId
+	if runId == nil then return end
+	local snap = Coop.Snap({
+		apiVersion = 1, runId = runId, metric = "damage",
+		scope = "party", period = "run", groupBy = "owner", windowSeconds = 0,
+	})
+	local actors = nil
+	local ownerIds = nil
+	if type(snap) == "table" then
+		actors = snap.actors
+		ownerIds = snap.ownerIds
+		if type(snap.totals) == "table" then
+			co.partyDmg = Num(snap.totals.displayAmount or snap.totals.periodAmount)
+		end
+	end
+	-- Prefer party meter for name/class/top spell; fall back to snapshot rows.
+	local partyLines = nil
+	if AZS_GetPartyMeter then
+		local okp, lines = pcall(AZS_GetPartyMeter)
+		if okp and type(lines) == "table" then partyLines = lines end
+	end
+	local seen = {}
+	local me = nil
+	if UnitName then
+		local n = UnitName("player")
+		if type(n) == "string" and n ~= "" then me = n end
+	end
+	local function Upsert(id, name, class, dmg, dps, share, top, topdps, present)
+		if type(id) ~= "string" or id == "" then return end
+		seen[id] = 1
+		local m = Coop.FindMember(co, id)
+		if not m then
+			m = {
+				id = id, name = name or "?", class = class or "", race = "",
+				isLocal = nil,
+				joinedAt = Num(t), leftAt = nil,
+				dmg = 0, dps = 0, share = 0, top = "", topdps = 0,
+				healDone = 0, healRecv = 0, downs = 0, revives = 0,
+			}
+			tinsert(co.members, m)
+		end
+		-- Local hero's actor name is often blank ("und"); prefer UnitName / party meter.
+		if id == co.localId and me then name = me end
+		if type(name) == "string" and name ~= "" and name ~= "?" then m.name = name end
+		if type(class) == "string" and class ~= "" then m.class = class end
+		if (not m.race or m.race == "") and type(m.name) == "string" then
+			m.race = Coop.PartyRaceByName(m.name)
+		end
+		if id == co.localId or (me and m.name == me) then m.isLocal = 1 end
+		if dmg ~= nil then m.dmg = Num(dmg) end
+		if dps ~= nil then m.dps = Num(dps) end
+		if share ~= nil then m.share = Num(share) end
+		if type(top) == "string" and top ~= "" then m.top = top end
+		if topdps ~= nil then m.topdps = Num(topdps) end
+		if present then
+			m.leftAt = nil
+		elseif m.leftAt == nil then
+			m.leftAt = Num(t)
+		end
+	end
+	-- Seed from the meter snapshot so owner ids stay stable for loadouts/healing.
+	if type(snap) == "table" and type(snap.rows) == "table" then
+		local i
+		for i = 1, table.getn(snap.rows) do
+			local row = snap.rows[i]
+			if type(row) == "table" and type(row.ownerId) == "string" then
+				local actor = actors and actors[row.ownerId]
+				local name = actor and actor.name or ""
+				local class = actor and actor.classKey or ""
+				local present = not actor or actor.state ~= "departed"
+				local dps = 0
+				if type(row.displayRate) == "table" then dps = Num(row.displayRate.value) end
+				Upsert(row.ownerId, name, class, row.displayAmount or row.periodAmount, dps, row.share, "", 0, present)
+			end
+		end
+	elseif type(ownerIds) == "table" then
+		local i
+		for i = 1, table.getn(ownerIds) do
+			local id = ownerIds[i]
+			local actor = actors and actors[id]
+			if type(id) == "string" then
+				Upsert(id, actor and actor.name, actor and actor.classKey, nil, nil, nil, "", nil,
+					not actor or actor.state ~= "departed")
+			end
+		end
+	end
+	-- Enrich with Party DPS (name / top spell). Never invent fake owner ids —
+	-- unmatched lines are matched by closest damage among unnamed members.
+	if type(partyLines) == "table" then
+		local i
+		for i = 1, table.getn(partyLines) do
+			local row = partyLines[i]
+			if type(row) == "table" and type(row.name) == "string" then
+				local m = nil
+				local j
+				for j = 1, table.getn(co.members) do
+					if co.members[j].name == row.name then m = co.members[j] break end
+				end
+				if not m and me and row.name == me then
+					m = Coop.FindMember(co, co.localId)
+				end
+				if not m then
+					-- Closest damage among members still missing a real name.
+					local best, bestDist = nil, nil
+					for j = 1, table.getn(co.members) do
+						local cand = co.members[j]
+						local badName = not cand.name or cand.name == "" or cand.name == "?"
+						if badName or (type(row.class) == "string" and row.class ~= "" and cand.class == row.class) then
+							local dist = math.abs(Num(cand.dmg) - Num(row.dmg))
+							if not bestDist or dist < bestDist then
+								best = cand
+								bestDist = dist
+							end
+						end
+					end
+					m = best
+				end
+				if m then
+					Upsert(m.id, row.name, row.class or m.class, row.dmg, row.dps, row.share, row.top, row.topdps, not m.leftAt)
+				end
+			end
+		end
+	end
+	-- Mark departed heroes not seen this pass.
+	local i
+	for i = 1, table.getn(co.members) do
+		local m = co.members[i]
+		if not seen[m.id] and m.leftAt == nil then m.leftAt = Num(t) end
+	end
+	Coop.Dedupe(co)
+end
+
+Coop.CaptureHealing = function(rec)
+	local co = Coop.Ensure(rec)
+	if not AZS_GetMeterContext then return end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" or ctx.runId == nil then return end
+	local runId = ctx.runId
+	local done = Coop.Snap({
+		apiVersion = 1, runId = runId, metric = "healing",
+		healingPerspective = "performed", scope = "party", period = "run",
+		groupBy = "owner", windowSeconds = 0,
+	})
+	local recv = Coop.Snap({
+		apiVersion = 1, runId = runId, metric = "healing",
+		healingPerspective = "received", scope = "party", period = "run",
+		groupBy = "owner", windowSeconds = 0,
+	})
+	if type(done) == "table" and type(done.totals) == "table" then
+		co.partyHeal = Num(done.totals.displayAmount or done.totals.periodAmount)
+	end
+	local function Apply(snap, field)
+		if type(snap) ~= "table" or type(snap.rows) ~= "table" then return end
+		local i
+		for i = 1, table.getn(snap.rows) do
+			local row = snap.rows[i]
+			if type(row) == "table" and type(row.ownerId) == "string" then
+				local m = Coop.FindMember(co, row.ownerId)
+				if m then m[field] = Num(row.displayAmount or row.periodAmount) end
+			end
+		end
+	end
+	Apply(done, "healDone")
+	Apply(recv, "healRecv")
+end
+
+Coop.CaptureOwnerMeters = function(rec)
+	local co = Coop.Ensure(rec)
+	if not AZS_GetMeterContext then return end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" or ctx.runId == nil then return end
+	local runId = ctx.runId
+	local i
+	for i = 1, table.getn(co.members) do
+		local m = co.members[i]
+		if type(m.id) == "string" and m.id ~= "" and not m.leftAt then
+			local snap = Coop.Snap({
+				apiVersion = 1, runId = runId, metric = "damage",
+				scope = "owner", ownerId = m.id, period = "run",
+				groupBy = "source", windowSeconds = 0,
+			})
+			if type(snap) == "table" and type(snap.rows) == "table" then
+				local meter = {}
+				local r
+				for r = 1, table.getn(snap.rows) do
+					local row = snap.rows[r]
+					if type(row) == "table" and Num(row.displayAmount or row.periodAmount) > 0 then
+						local name = "?"
+						if type(snap.sources) == "table" and type(row.sourceKey) == "string" then
+							local src = snap.sources[row.sourceKey]
+							if type(src) == "table" and type(src.name) == "string" then name = src.name end
+						end
+						local proc = 0
+						if row.procClassification == "proc" or row.nativeProc == true or row.nativeProc == 1 then
+							proc = 1
+						end
+						local dps = 0
+						if type(row.displayRate) == "table" then dps = Num(row.displayRate.value) end
+						tinsert(meter, {
+							name = name,
+							dmg = Num(row.displayAmount or row.periodAmount),
+							dps = dps,
+							share = Num(row.share),
+							proc = proc,
+						})
+					end
+				end
+				m.meter = Coop.MergeMeter(meter)
+			end
+		end
+	end
+end
+
+Coop.CaptureBuilds = function(rec)
+	local co = Coop.Ensure(rec)
+	if not AZS_GetMeterContext or not AZS_GetMeterLoadout then return end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" or ctx.runId == nil then return end
+	local runId = ctx.runId
+	local i
+	for i = 1, table.getn(co.members) do
+		local m = co.members[i]
+		if type(m.id) == "string" and m.id ~= "" and not m.leftAt then
+			local class = m.class
+			if (not class or class == "") and m.isLocal == 1 and type(AZS_ZONE) == "table" then
+				class = AZS_ZONE.class
+			end
+			local ok2, loadout, err = pcall(AZS_GetMeterLoadout, {
+				apiVersion = 1, runId = runId, ownerId = m.id,
+			})
+			if ok2 and type(loadout) == "table" then
+				local rev = loadout.loadoutRevision
+				local need = rev == nil or rev ~= m.buildRev
+				if not need and type(m.build) == "table" and Coop.PointsTotal(m.build.points) <= 0 then
+					need = true
+				end
+				if need then
+					m.build = Coop.CompactBuild(loadout, class or m.class)
+					m.buildRev = rev
+					if class and class ~= "" then m.class = class end
+				end
+			elseif type(err) == "table" and err.code == "OWNER_NOT_PRESENT" then
+				-- Keep last good build.
+			end
+			if type(m.build) == "table" then
+				Coop.RefreshPoints(m.build, m.class or class, true)
+				-- Your tip-scan / worn gear is authoritative; don't paint partners with it.
+				if m.isLocal == 1 then
+					if type(m.build.spells) == "table" then
+						SpellTips.Apply(m.build.spells)
+					end
+					if type(m.build.jewelry) == "table" then
+						local worn = ReadWorn()
+						local w
+						for w = 1, table.getn(worn) do
+							local piece = worn[w]
+							local have = false
+							local j
+							for j = 1, table.getn(m.build.jewelry) do
+								local jew = m.build.jewelry[j]
+								local same = jew.name == piece.name
+								if not same then
+									local a = JewelBase(jew.name)
+									local b = JewelBase(piece.name)
+									same = a ~= "" and a == b
+								end
+								if same then
+									have = true
+									if (type(jew.icon) ~= "string" or jew.icon == "") and type(piece.icon) == "string" then
+										jew.icon = piece.icon
+									end
+									if type(piece.rarity) == "string" and piece.rarity ~= "" then
+										jew.rarity = piece.rarity
+									end
+									if type(piece.stats) == "string" and piece.stats ~= "" then
+										jew.stats = piece.stats
+									end
+									if type(piece.name) == "string" and piece.name ~= "" then
+										jew.name = piece.name
+									end
+								end
+							end
+							if not have then tinsert(m.build.jewelry, piece) end
+						end
+						ShareJewelIcons(m.build.jewelry)
+						m.build.jewelry = LatestJewels(m.build.jewelry)
+					end
+				end
+				if type(m.build.spells) == "table" then
+					local s
+					for s = 1, table.getn(m.build.spells) do
+						local row = m.build.spells[s]
+						if type(row) == "table" and (type(row.icon) ~= "string" or row.icon == "") then
+							local icon = SpellBarIcon(row.key)
+							if icon == "" and type(row.name) == "string" then
+								local tipKey = SpellTips.KeyFromTipName(row.name)
+								if tipKey then icon = SpellBarIcon(tipKey) end
+							end
+							if icon ~= "" then row.icon = icon end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+Coop.FightSaved = function(co, encounterId)
+	if type(co.fights) ~= "table" then return false end
+	local i
+	for i = 1, table.getn(co.fights) do
+		if co.fights[i].encounterId == encounterId then return true end
+	end
+	return false
+end
+
+Coop.CaptureEncounter = function(rec, force)
+	local co = Coop.Ensure(rec)
+	if not AZS_GetMeterContext then return end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" or ctx.runId == nil then return end
+	local enc = ctx.encounter
+	if type(enc) ~= "table" then return end
+	local id = enc.encounterId
+	if type(id) ~= "string" or id == "" then return end
+	local prevId = co.watchEnc
+	local prevState = co.watchEncState
+	co.watchEnc = id
+	co.watchEncState = enc.state
+	local take = force
+	if not take and enc.state == "completed" then take = true end
+	if not take and prevId and prevId ~= id and prevState == "active" then
+		-- Fight rolled over; try to snapshot the previous id if we still can.
+		id = prevId
+		take = true
+	end
+	if not take then return end
+	if Coop.FightSaved(co, id) then return end
+	local snap = Coop.Snap({
+		apiVersion = 1, runId = ctx.runId, metric = "damage",
+		scope = "party", period = "encounter", groupBy = "owner", windowSeconds = 0,
+	})
+	if type(snap) ~= "table" then return end
+	-- Only accept if this snapshot is for our encounter (or force at end).
+	local snapEnc = snap.period and snap.period.encounter
+	local snapId = snapEnc and snapEnc.encounterId
+	if type(snapId) == "string" and snapId ~= "" and snapId ~= id and not force then
+		return
+	end
+	if type(snapId) == "string" and snapId ~= "" then id = snapId end
+	if Coop.FightSaved(co, id) then return end
+	local bosses = {}
+	local bossIds = (snapEnc and snapEnc.bossActorIds) or (enc.bossActorIds)
+	if type(bossIds) == "table" and type(snap.actors) == "table" then
+		local b
+		for b = 1, table.getn(bossIds) do
+			local aid = bossIds[b]
+			local actor = snap.actors[aid]
+			if type(actor) == "table" and type(actor.name) == "string" then
+				tinsert(bosses, actor.name)
+			end
+		end
+	end
+	local heroes = {}
+	if type(snap.rows) == "table" then
+		local r
+		for r = 1, table.getn(snap.rows) do
+			local row = snap.rows[r]
+			if type(row) == "table" and type(row.ownerId) == "string" then
+				local name = "?"
+				if type(snap.actors) == "table" and type(snap.actors[row.ownerId]) == "table" then
+					name = snap.actors[row.ownerId].name or name
+				end
+				tinsert(heroes, {
+					id = row.ownerId,
+					name = name,
+					dmg = Num(row.displayAmount or row.periodAmount),
+					share = Num(row.share),
+				})
+			end
+		end
+	end
+	local fight = {
+		encounterId = id,
+		bosses = bosses,
+		start = Num(enc.startRunSeconds or (snapEnc and snapEnc.startRunSeconds)),
+		finish = Num(enc.endRunSeconds or (snapEnc and snapEnc.endRunSeconds)),
+		heroes = heroes,
+		dmg = Num(snap.totals and (snap.totals.displayAmount or snap.totals.periodAmount)),
+	}
+	tinsert(co.fights, fight)
+	while table.getn(co.fights) > CFG.COOP_FIGHTS_MAX do
+		table.remove(co.fights, 1)
+	end
+end
+
+Coop.AddEvent = function(rec, kind, who, by)
+	if not rec or rec.party ~= 1 then return end
+	local co = Coop.Ensure(rec)
+	local t = RunTime()
+	if t <= 0 then t = Num(rec.liveT) end
+	tinsert(co.events, {
+		t = Num(t),
+		kind = kind or "?",
+		who = who or "",
+		by = by or "",
+	})
+	while table.getn(co.events) > CFG.COOP_EVENTS_MAX do
+		table.remove(co.events, 1)
+	end
+	-- downs = times that hero fell; revives = times that hero brought someone back.
+	local i
+	for i = 1, table.getn(co.members) do
+		local m = co.members[i]
+		if kind == "downed" then
+			if m.isLocal == 1 then m.downs = Num(m.downs) + 1 end
+		elseif kind == "frienddown" then
+			if who ~= "" and m.name == who then m.downs = Num(m.downs) + 1 end
+		elseif kind == "revived" then
+			if by ~= "" and m.name == by then m.revives = Num(m.revives) + 1 end
+		end
+	end
+end
+
+Coop.OnBanner = function(banner)
+	if type(banner) ~= "table" then return end
+	local kind = banner.kind
+	if kind ~= "downed" and kind ~= "frienddown" and kind ~= "revived" then return end
+	local rec = nil
+	local id = RunId()
+	if id then rec = FindRun(id) end
+	if not rec or rec.party ~= 1 then return end
+	local who = ""
+	local by = ""
+	if type(banner.text) == "string" then who = banner.text end
+	if type(banner.name) == "string" and banner.name ~= "" then who = banner.name end
+	if kind == "downed" then
+		who = (type(AZS_ZONE) == "table" and AZS_ZONE.hero) or UnitName and UnitName("player") or "you"
+	elseif kind == "frienddown" then
+		if type(banner.name) == "string" then who = banner.name end
+	elseif kind == "revived" then
+		who = (type(AZS_ZONE) == "table" and AZS_ZONE.hero) or "you"
+		if AZS_GetRevive then
+			local ok, rev = pcall(AZS_GetRevive)
+			if ok and type(rev) == "table" and type(rev.by) == "string" then by = rev.by end
+		end
+	end
+	Coop.AddEvent(rec, kind, who, by)
+end
+
+Coop.Note = function(rec, t, force)
+	if not rec then return end
+	NoteParty(rec)
+	if rec.party ~= 1 then return end
+	t = Num(t)
+	if not force then
+		if rec.coopTry and t - Num(rec.coopTry) < CFG.COOP_CAPTURE then return end
+	end
+	rec.coopTry = t
+	Coop.CaptureRoster(rec, t)
+	Coop.CaptureHealing(rec)
+	Coop.CaptureOwnerMeters(rec)
+	Coop.CaptureBuilds(rec)
+	Coop.CaptureEncounter(rec, force)
+end
+
+Coop.Dump = function()
+	Say("coopdump — probe start")
+	local ph = Phase()
+	Say("phase=" .. tostring(ph) .. " liveParty=" .. tostring(Coop.LiveParty()))
+	if type(AZS_RUN) == "table" then
+		Say(string.format("AZS_RUN kills=%s gold=%s dealt=%s taken=%s xp=%s/%s lvl=%s",
+			tostring(AZS_RUN.kills), tostring(AZS_RUN.ge), tostring(AZS_RUN.dealt),
+			tostring(AZS_RUN.taken), tostring(AZS_RUN.xp), tostring(AZS_RUN.xpn), tostring(AZS_RUN.lvl)))
+	else
+		Say("AZS_RUN missing")
+	end
+	if not AZS_GetMeterContext then
+		Say("AZS_GetMeterContext missing")
+		return
+	end
+	local ok, ctx = pcall(AZS_GetMeterContext)
+	if not ok or type(ctx) ~= "table" then
+		Say("context failed")
+		return
+	end
+	Say(string.format("runId=%s partyState=%s partyId=%s local=%s host=%s",
+		tostring(ctx.runId), tostring(ctx.partyState), tostring(ctx.partyId),
+		tostring(ctx.localOwnerId), tostring(ctx.authorityId)))
+	if type(ctx.encounter) == "table" then
+		Say(string.format("encounter id=%s state=%s",
+			tostring(ctx.encounter.encounterId), tostring(ctx.encounter.state)))
+	end
+	if AZS_GetPartyMeter then
+		local okp, lines, total, dps = pcall(AZS_GetPartyMeter)
+		if okp and type(lines) == "table" then
+			Say(string.format("PartyMeter lines=%d total=%s dps=%s", table.getn(lines), tostring(total), tostring(dps)))
+			local i
+			for i = 1, table.getn(lines) do
+				local row = lines[i]
+				if type(row) == "table" then
+					Say(string.format("  [%d] %s class=%s dmg=%s share=%s top=%s",
+						i, tostring(row.name), tostring(row.class), tostring(row.dmg),
+						tostring(row.share), tostring(row.top)))
+				end
+			end
+		else
+			Say("PartyMeter empty or failed")
+		end
+	else
+		Say("AZS_GetPartyMeter missing")
+	end
+	local snap = Coop.Snap({
+		apiVersion = 1, runId = ctx.runId, metric = "damage",
+		scope = "party", period = "run", groupBy = "owner", windowSeconds = 0,
+	})
+	if type(snap) == "table" then
+		local n = type(snap.ownerIds) == "table" and table.getn(snap.ownerIds) or 0
+		Say("party snapshot owners=" .. tostring(n) .. " rows=" .. tostring(type(snap.rows) == "table" and table.getn(snap.rows) or 0))
+		if type(snap.actors) == "table" and type(snap.ownerIds) == "table" then
+			local i
+			for i = 1, table.getn(snap.ownerIds) do
+				local id = snap.ownerIds[i]
+				local a = snap.actors[id]
+				if type(a) == "table" then
+					Say(string.format("  actor %s name=%s class=%s state=%s",
+						tostring(id), tostring(a.name), tostring(a.classKey), tostring(a.state)))
+					if AZS_GetMeterLoadout and id ~= ctx.localOwnerId then
+						local ok2, loadout, err = pcall(AZS_GetMeterLoadout, {
+							apiVersion = 1, runId = ctx.runId, ownerId = id,
+						})
+						if ok2 and type(loadout) == "table" then
+							Say(string.format("    loadout talents=%s abilities=%s jewelry=%s rev=%s",
+								tostring(type(loadout.talents) == "table" and table.getn(loadout.talents) or 0),
+								tostring(type(loadout.abilities) == "table" and table.getn(loadout.abilities) or 0),
+								tostring(type(loadout.runJewelry) == "table" and table.getn(loadout.runJewelry) or 0),
+								tostring(loadout.loadoutRevision)))
+							local built = Coop.CompactBuild(loadout, a.classKey or "")
+							Say("    points " .. SplitOf(built.points) .. " total=" .. tostring(Coop.PointsTotal(built.points)))
+							if type(loadout.talents) == "table" then
+								local ti, shown = 0, 0
+								Each(loadout.talents, function(trow)
+									if type(trow) == "table" and Num(trow.rank) > 0 and shown < 5 then
+										shown = shown + 1
+										Say(string.format("    talent treeKey=%s src=%s rank=%s -> %s",
+											tostring(trow.treeKey), tostring(trow.sourceKey),
+											tostring(trow.rank),
+											tostring(Coop.TalentTree(trow, loadout.sources, a.classKey or ""))))
+									end
+									ti = ti + 1
+								end)
+							end
+						else
+							Say("    loadout failed: " .. tostring(err and err.code))
+						end
+					end
+					local race = Coop.PartyRaceByName(a.name)
+					if race ~= "" then Say("    UnitRace=" .. race) end
+				end
+			end
+		end
+	else
+		Say("party snapshot unavailable (solo, NOT_READY, or no API)")
+	end
+	if AZS_GetRevive then
+		local okr, rev = pcall(AZS_GetRevive)
+		if okr and type(rev) == "table" then
+			Say(string.format("revive down=%s by=%s reviving=%s",
+				tostring(rev.down), tostring(rev.by), tostring(rev.reviving)))
+		else
+			Say("revive empty")
+		end
+	else
+		Say("AZS_GetRevive missing")
+	end
+	if AZS_GetDownedPartyMembers then
+		local okd, list = pcall(AZS_GetDownedPartyMembers)
+		if okd and type(list) == "table" then
+			Say("downed members=" .. tostring(table.getn(list)))
+		else
+			Say("downed members empty/failed")
+		end
+	else
+		Say("AZS_GetDownedPartyMembers missing")
+	end
+	if not RunStatsDB.coopDump then RunStatsDB.coopDump = {} end
+	RunStatsDB.coopDump.last = {
+		at = date and date("%Y-%m-%d %H:%M") or "",
+		phase = ph,
+		partyState = ctx.partyState,
+		partyId = ctx.partyId,
+		localId = ctx.localOwnerId,
+		kills = type(AZS_RUN) == "table" and AZS_RUN.kills or nil,
+		dealt = type(AZS_RUN) == "table" and AZS_RUN.dealt or nil,
+	}
+	Say("saved summary to RunStatsDB.coopDump.last — logout to persist.")
 end
 
 local function TrackXp(rec)
@@ -2260,7 +3446,20 @@ local function Announce(rec)
 			extra = " · " .. specName .. " " .. SplitOf(rec.atEnd.points)
 		end
 	end
-	Say("Saved " .. Clock(t) .. " · " .. who .. " · " .. where .. extra)
+	local mode = ""
+	if rec.party == 1 then
+		local n = 0
+		if type(rec.co) == "table" then n = Num(rec.co.maxSize) end
+		if n < 2 and type(rec.co) == "table" and type(rec.co.members) == "table" then
+			n = table.getn(rec.co.members)
+		end
+		if n > 1 then
+			mode = " · co-op x" .. tostring(math.floor(n))
+		else
+			mode = " · co-op"
+		end
+	end
+	Say("Saved " .. Clock(t) .. " · " .. who .. " · " .. where .. extra .. mode)
 end
 
 local function ArchiveRestart(rec)
@@ -2268,7 +3467,7 @@ local function ArchiveRestart(rec)
 		id = (rec.id or "run") .. "#" .. tostring(table.getn(RunStatsDB.runs) + 1),
 		class = rec.class, cname = rec.cname, zone = rec.zone, zname = rec.zname,
 		heroic = rec.heroic, affixes = rec.affixes, hero = rec.hero, len = rec.len,
-		race = rec.race, rname = rec.rname, party = rec.party,
+		race = rec.race, rname = rec.rname, party = rec.party, co = rec.co,
 		result = rec.result, tEnd = rec.tEnd, at20 = rec.at20, atEnd = rec.atEnd, atWin = rec.atWin,
 		preview = rec.preview, watched = rec.watched, told = 1,
 		bestHit = rec.bestHit, bestName = rec.bestName, bestHits = CopyBestHits(rec.bestHits),
@@ -2308,6 +3507,9 @@ local function ArchiveRestart(rec)
 	rec.preview = nil
 	rec.watched = nil
 	rec.told = nil
+	rec.co = nil
+	rec.coopTry = nil
+	rec.party = 0
 	rec.open = 1
 	Options.StampWhen(rec)
 	SpellTips.Clear()
@@ -2573,7 +3775,9 @@ Options.DetailsKey = function(btn)
 	if btn.rec and type(btn.rec.id) == "string" then id = btn.rec.id end
 	local w = RunStatsDB and RunStatsDB.window
 	if w == nil then w = "endless" end
-	return id .. "|" .. tostring(w)
+	local mode = "d"
+	if btn.partyOnly == 1 then mode = "p" end
+	return id .. "|" .. tostring(w) .. "|" .. mode
 end
 
 -- On Options so OpenBuild stays under Lua 5.0's 32-upvalue limit.
@@ -2721,11 +3925,11 @@ local function Finish(rec)
 		end
 		return changed
 	end
-	NoteParty(rec)
 	local t = RunTime()
 	if summary and tonumber(summary.t) then t = Num(summary.t) end
 	if t <= 0 then t = Num(rec.liveT) end
 	if t <= 0 and type(rec.pending) == "table" then t = Num(rec.pending.t) end
+	Coop.Note(rec, t, true)
 	NoteBuild(rec, t, false)
 	TrackSpells(rec, t)
 	NotePace(rec, t)
@@ -2779,6 +3983,18 @@ local function Duration(rec)
 	return 0
 end
 
+-- SavedVariables often reloads sparse mark keys as strings ("16"); accept both.
+Options.MarkSheet = function(rec, mins)
+	if type(rec) ~= "table" or type(rec.marks) ~= "table" then return nil end
+	mins = Num(mins)
+	if mins <= 0 then return nil end
+	local key = math.floor(mins)
+	local sheet = rec.marks[key]
+	if type(sheet) ~= "table" then sheet = rec.marks[tostring(key)] end
+	if type(sheet) == "table" then return sheet end
+	return nil
+end
+
 local function SheetFor(rec, mode)
 	if mode == nil then mode = Window.Mode() end
 	if rec.open == 1 and rec.watched == 1 and type(rec.preview) == "table" then
@@ -2786,10 +4002,7 @@ local function SheetFor(rec, mode)
 	end
 	-- Mid-run minute marks (only present on runs that reached that clock).
 	if type(mode) == "number" then
-		if type(rec.marks) == "table" and type(rec.marks[mode]) == "table" then
-			return rec.marks[mode]
-		end
-		return nil
+		return Options.MarkSheet(rec, mode)
 	end
 	if mode == "endless" then
 		if type(rec.atEnd) == "table" then return rec.atEnd end
@@ -2805,12 +4018,38 @@ local function SheetFor(rec, mode)
 	if rec.open ~= 1 and type(rec.pending) == "table" then return rec.pending end
 end
 
+-- Deep-ish copy so a mid-run mark keeps its own party roster/meters.
+Coop.CopyValue = function(src, depth)
+	if type(src) ~= "table" then return src end
+	depth = Num(depth)
+	if depth <= 0 then return nil end
+	local out = {}
+	local k, v
+	for k, v in pairs(src) do
+		if type(v) == "table" then
+			out[k] = Coop.CopyValue(v, depth - 1)
+		else
+			out[k] = v
+		end
+	end
+	return out
+end
+
+Coop.FreezeCo = function(co)
+	if type(co) ~= "table" then return nil end
+	return Coop.CopyValue(co, 8)
+end
+
 -- Build a frozen sheet at markSec (mid-run minutes). Used for future runs only.
 Options.CaptureMark = function(rec, t, markSec)
 	if type(rec) ~= "table" then return end
 	t = Num(t)
 	markSec = Num(markSec)
 	if markSec <= 0 then return end
+	-- Refresh party ledger at this clock so the mark freezes co-op state too.
+	if rec.party == 1 or (Coop.LiveParty and Coop.LiveParty()) then
+		Coop.Note(rec, t, true)
+	end
 	if rec.based ~= 1 then
 		NoteBuild(rec, t, true)
 	else
@@ -2829,6 +4068,10 @@ Options.CaptureMark = function(rec, t, markSec)
 	CaptureMeter(sheet)
 	CaptureTaken(sheet, rec)
 	ApplyLastGraphs(sheet, rec)
+	if type(rec.co) == "table" then
+		sheet.co = Coop.FreezeCo(rec.co)
+		sheet.party = 1
+	end
 	return sheet
 end
 
@@ -2843,8 +4086,13 @@ NoteMarks = function(rec, t)
 	for i = 1, table.getn(marks) do
 		local m = marks[i]
 		local sec = m * 60
-		if t >= sec and type(rec.marks[m]) ~= "table" then
-			rec.marks[m] = Options.CaptureMark(rec, t, sec)
+		if t >= sec and not Options.MarkSheet(rec, m) then
+			local sheet = Options.CaptureMark(rec, t, sec)
+			if type(sheet) == "table" then
+				-- Store under both number and string keys (SV reload safety).
+				rec.marks[m] = sheet
+				rec.marks[tostring(m)] = sheet
+			end
 		end
 	end
 end
@@ -2898,21 +4146,23 @@ local function Anchor()
 		local i
 		for i = table.getn(runs), 1, -1 do
 			local rec = runs[i]
-			local sheet = rec.atEnd or rec.at20 or rec.pending
-			if rec.class and rec.class ~= "" or type(sheet) == "table" then
-				local specName, leading = SpecOf(type(sheet) == "table" and sheet.points)
-				local class = rec.class or ""
-				ctx = {
-					class = class,
-					cname = ClassName(class, rec.cname),
-					zone = rec.zone or "",
-					zname = rec.zname or rec.zone or "Saved run",
-					heroic = Num(rec.heroic),
-					specName = specName,
-					leading = leading,
-					live = nil,
-				}
-				break
+			if Coop.Match(rec) then
+				local sheet = rec.atEnd or rec.at20 or rec.pending
+				if rec.class and rec.class ~= "" or type(sheet) == "table" then
+					local specName, leading = SpecOf(type(sheet) == "table" and sheet.points)
+					local class = rec.class or ""
+					ctx = {
+						class = class,
+						cname = ClassName(class, rec.cname),
+						zone = rec.zone or "",
+						zname = rec.zname or rec.zone or "Saved run",
+						heroic = Num(rec.heroic),
+						specName = specName,
+						leading = leading,
+						live = nil,
+					}
+					break
+				end
 			end
 		end
 	end
@@ -2960,10 +4210,13 @@ local function KnownClasses()
 	end
 	local runs = RunStatsDB.runs
 	for i = 1, table.getn(runs) do
-		local key = runs[i].class
-		if type(key) == "string" and key ~= "" and not have[key] then
-			have[key] = ClassName(key, runs[i].cname)
-			tinsert(list, key)
+		local rec = runs[i]
+		if Coop.Match(rec) then
+			local key = rec.class
+			if type(key) == "string" and key ~= "" and not have[key] then
+				have[key] = ClassName(key, rec.cname)
+				tinsert(list, key)
+			end
 		end
 	end
 	return list, have
@@ -2980,10 +4233,13 @@ local function KnownMaps()
 	end
 	local runs = RunStatsDB.runs
 	for i = 1, table.getn(runs) do
-		local key = runs[i].zone
-		if type(key) == "string" and key ~= "" and not have[key] then
-			have[key] = runs[i].zname or Pretty(key)
-			tinsert(list, key)
+		local rec = runs[i]
+		if Coop.Match(rec) then
+			local key = rec.zone
+			if type(key) == "string" and key ~= "" and not have[key] then
+				have[key] = rec.zname or Pretty(key)
+				tinsert(list, key)
+			end
 		end
 	end
 	return list, have
@@ -3067,7 +4323,7 @@ local function Collect()
 	for i = 1, table.getn(runs) do
 		local rec = runs[i]
 		local sheet = SheetFor(rec, mode)
-		if rec.party ~= 1 and sheet then
+		if Coop.Match(rec) and sheet then
 			local classOk = class == "all" or class == "" or rec.class == class or not rec.class or rec.class == ""
 			local mapOk = mapFilter == "all" or mapFilter == "" or not rec.zone or rec.zone == "" or rec.zone == mapFilter
 			local diffOk = diff < 0 or DiffLevel(rec.heroic) == diff
@@ -3124,6 +4380,441 @@ local function Cap(text, n)
 	if type(text) ~= "string" then return "" end
 	if string.len(text) <= n then return text end
 	return string.sub(text, 1, n - 2) .. ".."
+end
+
+-- Assigned here so Cap / ClassName / KindName / SpecOf are already local upvalues.
+Coop.Dedupe = function(co)
+	if type(co) ~= "table" or type(co.members) ~= "table" then return end
+	local byKey = {}
+	local order = {}
+	local i
+	for i = 1, table.getn(co.members) do
+		local m = co.members[i]
+		local name = m.name or ""
+		local key
+		if name ~= "" and name ~= "?" then
+			key = "n:" .. string.lower(name)
+		else
+			key = "i:" .. tostring(m.id)
+		end
+		local prev = byKey[key]
+		if not prev then
+			byKey[key] = m
+			tinsert(order, key)
+		else
+			if m.isLocal == 1 then prev.isLocal = 1 end
+			if Num(m.dmg) >= Num(prev.dmg) then
+				prev.dmg = Num(m.dmg)
+				prev.dps = Num(m.dps)
+				prev.share = Num(m.share)
+				if type(m.top) == "string" and m.top ~= "" then prev.top = m.top end
+				prev.topdps = Num(m.topdps)
+			end
+			if Num(m.healDone) > Num(prev.healDone) then prev.healDone = Num(m.healDone) end
+			if Num(m.healRecv) > Num(prev.healRecv) then prev.healRecv = Num(m.healRecv) end
+			if Num(m.downs) > Num(prev.downs) then prev.downs = Num(m.downs) end
+			if Num(m.revives) > Num(prev.revives) then prev.revives = Num(m.revives) end
+			if type(m.class) == "string" and m.class ~= "" then prev.class = m.class end
+			if type(m.race) == "string" and m.race ~= "" then prev.race = m.race end
+			if type(m.build) == "table" and (type(prev.build) ~= "table" or not prev.build.points) then
+				prev.build = m.build
+			end
+			if type(m.meter) == "table" and (type(prev.meter) ~= "table" or table.getn(prev.meter) == 0) then
+				prev.meter = m.meter
+			end
+			if type(m.id) == "string" and string.sub(m.id, 1, 6) ~= "party:" then
+				if type(prev.id) ~= "string" or string.sub(prev.id, 1, 6) == "party:" then
+					prev.id = m.id
+				end
+			end
+			if not m.leftAt then prev.leftAt = nil end
+		end
+	end
+	local out = {}
+	for i = 1, table.getn(order) do tinsert(out, byKey[order[i]]) end
+	co.members = out
+	co.size = 0
+	for i = 1, table.getn(out) do
+		if not out[i].leftAt then co.size = co.size + 1 end
+	end
+	if co.size > Num(co.maxSize) then co.maxSize = co.size end
+	if Num(co.maxSize) < 1 then co.maxSize = table.getn(out) end
+end
+
+Coop.Members = function(co)
+	if type(co) ~= "table" then return {} end
+	Coop.Dedupe(co)
+	if type(co.members) ~= "table" then return {} end
+	return co.members
+end
+
+Coop.HexRGB = function(r, g, b)
+	local function byte(x)
+		x = math.floor(Num(x) * 255 + 0.5)
+		if x < 0 then x = 0 end
+		if x > 255 then x = 255 end
+		return x
+	end
+	return string.format("%02x%02x%02x", byte(r), byte(g), byte(b))
+end
+
+Coop.ClassRGB = function(class, shade)
+	local c = CFG.CLASS_COLOR[class]
+	local r, g, b = 0.9, 0.88, 0.8
+	if type(c) == "table" then r, g, b = c[1], c[2], c[3] end
+	shade = Num(shade)
+	if shade <= 0 then return r, g, b end
+	-- Odd shades darken, even shades lighten — keeps same-class players distinct.
+	if math.mod(shade, 2) == 1 then
+		local f = 1 - 0.28 * math.ceil(shade / 2)
+		if f < 0.45 then f = 0.45 end
+		return r * f, g * f, b * f
+	end
+	local f = 0.18 * (shade / 2)
+	return math.min(1, r + (1 - r) * f), math.min(1, g + (1 - g) * f), math.min(1, b + (1 - b) * f)
+end
+
+Coop.MemberColor = function(members)
+	local shades = {}
+	local counts = {}
+	local i
+	for i = 1, table.getn(members) do
+		local m = members[i]
+		local cls = m.class or ""
+		local n = counts[cls] or 0
+		shades[m.id or i] = n
+		counts[cls] = n + 1
+	end
+	return shades
+end
+
+Coop.NameTag = function(m, shades)
+	local name = m.name or "?"
+	local tag = ""
+	if m.isLocal == 1 then tag = " (you)" end
+	if m.leftAt then tag = tag .. " left" end
+	local shade = 0
+	if type(shades) == "table" then shade = shades[m.id] or 0 end
+	local r, g, b = Coop.ClassRGB(m.class, shade)
+	local hex = Coop.HexRGB(r, g, b)
+	local className = ClassName(m.class)
+	return "|cff" .. hex .. name .. tag .. "|r  |cff" .. hex .. className .. "|r", r, g, b, hex
+end
+
+Coop.WithText = function(rec)
+	if type(rec) ~= "table" or type(rec.co) ~= "table" then return "-" end
+	local members = Coop.Members(rec.co)
+	local me = nil
+	if UnitName then
+		local n = UnitName("player")
+		if type(n) == "string" then me = n end
+	end
+	local parts = {}
+	local i
+	for i = 1, table.getn(members) do
+		local m = members[i]
+		local mine = m.isLocal == 1 or (me and m.name == me)
+		if not mine then
+			tinsert(parts, Cap(m.name or "?", 10))
+		end
+	end
+	if table.getn(parts) == 0 then return "-" end
+	local out = parts[1]
+	local p
+	for p = 2, table.getn(parts) do
+		out = out .. ", " .. parts[p]
+	end
+	return Cap(out, 14)
+end
+
+-- Spells / Jewelry / Damage sources under one party member (matches Details).
+Coop.WriteMemberSections = function(Add, m, lineY)
+	if type(Add) ~= "function" or type(m) ~= "table" then return end
+	local build = m.build
+	if type(build) ~= "table" then build = {} end
+
+	Add(" ", 1, 1, 1)
+	Add("Spells", 1, 0.82, 0)
+	local spellN = 0
+	if type(build.spells) == "table" then
+		local s
+		for s = 1, table.getn(build.spells) do
+			local row = build.spells[s]
+			if type(row) == "table" then
+				local name = row.name or ""
+				if name ~= "" and not IsRacial(row.key, name) then
+					spellN = spellN + 1
+					local icon = row.icon
+					if type(icon) ~= "string" or icon == "" then
+						icon = SpellBarIcon(row.key)
+					end
+					-- Tip-scan cache is keyed by ability key; also try name→key.
+					if (type(icon) ~= "string" or icon == "") and type(name) == "string"
+						and SpellTips and SpellTips.KeyFromTipName then
+						local tipKey = SpellTips.KeyFromTipName(name)
+						if tipKey then icon = SpellBarIcon(tipKey) end
+					end
+					if type(icon) == "string" and icon ~= "" then
+						row.icon = icon
+					end
+					Add(name .. "  |cffffd24a" .. tostring(math.floor(Num(row.rank))) .. "|r", 0.85, 0.9, 1, icon)
+					local upgrades = SpellTips.CleanTipBit(row.upgrades)
+					if upgrades == "" and type(row.key) == "string" and row.key ~= ""
+						and type(SpellTips.upgrades) == "table" then
+						upgrades = SpellTips.CleanTipBit(SpellTips.upgrades[row.key])
+					end
+					if upgrades ~= "" then
+						-- |cff so color sticks (SetTextColor alone reads too close to the name).
+						Add("  |cff7a9eb8Upgrades: " .. upgrades .. "|r", 1, 1, 1)
+					end
+				end
+			end
+		end
+	end
+	if spellN == 0 then Add("Not saved for this run.", 0.7, 0.7, 0.65) end
+
+	Add(" ", 1, 1, 1)
+	Add("Jewelry", 1, 0.82, 0)
+	local jewelN = 0
+	local jewelRows = {}
+	if type(build.jewelry) == "table" then
+		jewelRows = LatestJewels(build.jewelry)
+	end
+	local j
+	for j = 1, table.getn(jewelRows) do
+		local piece = jewelRows[j]
+		local name = piece.name or ""
+		if name ~= "" then
+			jewelN = jewelN + 1
+			local line = KindName(piece.category) .. "    " .. name
+			if type(piece.rarity) == "string" and piece.rarity ~= "" then
+				line = piece.rarity .. "    " .. line
+			end
+			Add(line, 0.8, 1, 0.75, piece.icon)
+			if type(piece.stats) == "string" and piece.stats ~= "" then
+				local stats = string.gsub(piece.stats, "|n", " · ")
+				stats = string.gsub(stats, "\n", " · ")
+				stats = SpellTips.CleanTipBit(stats)
+				Add("  |cff7a9eb8" .. stats .. "|r", 1, 1, 1)
+			end
+		end
+	end
+	if jewelN == 0 then Add("Not saved for this run.", 0.7, 0.7, 0.65) end
+
+	Add(" ", 1, 1, 1)
+	Add("Damage", 1, 0.82, 0)
+	local meterN = 0
+	local meter = Coop.MergeMeter(m.meter)
+	local r
+	for r = 1, table.getn(meter) do
+		local row = meter[r]
+		if type(row) == "table" and Num(row.dmg) > 0 then
+			meterN = meterN + 1
+			local line = (row.name or "?") .. "    " .. Short(row.dmg) .. "    " .. Pct(row.share)
+			local at
+			if row.proc == 1 then
+				at = Add(line .. "    proc", 0.75, 0.88, 1)
+			else
+				at = Add(line, 0.95, 0.92, 0.84)
+			end
+			-- Same share bars as Details (Options.PopBar wired from OpenBuild).
+			if at and Options.PopBar and Options.BarColor and type(lineY) == "table" then
+				local br, bg, bb = Options.BarColor(meterN)
+				Options.PopBar(at, row.share, br, bg, bb, lineY[at])
+			end
+		end
+	end
+	if meterN == 0 then Add("Not saved for this run.", 0.7, 0.7, 0.65) end
+end
+
+Coop.WriteDetails = function(Add, Head, Line, Bit, rec, lineY, sheet)
+	if not rec or rec.party ~= 1 then return end
+	-- Prefer a mid-run mark's frozen party snapshot when viewing that mark.
+	local co = rec.co
+	if type(sheet) == "table" and type(sheet.co) == "table" then
+		co = sheet.co
+	end
+	if type(co) ~= "table" then
+		Add("No party data was saved for this run.", 0.7, 0.7, 0.65)
+		return
+	end
+	local members = Coop.Members(co)
+	if table.getn(members) == 0 then
+		Add("No party data was saved for this run.", 0.7, 0.7, 0.65)
+		return
+	end
+	local shades = Coop.MemberColor(members)
+	local size = Num(co.size)
+	if size < 1 then size = table.getn(members) end
+	Line(
+		Bit("Players", tostring(math.floor(size)), "9fd4ff"),
+		Bit("Party damage", Short(co.partyDmg), "ffb040"),
+		Bit("Party healing", Short(co.partyHeal), "7dce7d"))
+	local i
+	for i = 1, table.getn(members) do
+		local m = members[i]
+		Add(" ", 1, 1, 1)
+		local tag = Coop.NameTag(m, shades)
+		Add(tag, 1, 1, 1)
+		Line(
+			Bit("Damage", Short(m.dmg), "ffb040"),
+			Bit("DPS", Short(m.dps), "ff6b4a"),
+			Bit("Share", Pct(m.share), "f0e6d2"))
+		if type(m.top) == "string" and m.top ~= "" then
+			if Num(m.topdps) > 0 then
+				Line(Bit("Top", m.top, "7eb8e8"), Bit("Top DPS", Short(m.topdps), "ff6b4a"))
+			else
+				Line(Bit("Top", m.top, "7eb8e8"))
+			end
+		end
+		Line(
+			Bit("Heal done", Short(m.healDone), "7dce7d"),
+			Bit("Heal recv", Short(m.healRecv), "8dff8d"),
+			Bit("Downs", Count(m.downs), "ff7080"),
+			Bit("Revives", Count(m.revives), "9fd4ff"))
+		if type(m.build) ~= "table" then m.build = {} end
+		-- Never use ReadTalentFrame here — on AZS it stubs to 1/1/0 and wipes real ranks.
+		Coop.RefreshPoints(m.build, m.class, true)
+		local pts = Coop.PointsTotal(m.build.points)
+		if pts > 0 then
+			Add("  " .. Coop.TalentLabel(m.build.points, m.class), 0.85, 0.82, 0.65)
+		elseif type(m.build.talents) == "table" and table.getn(m.build.talents) > 0 then
+			local ranks = 0
+			local t
+			for t = 1, table.getn(m.build.talents) do
+				ranks = ranks + Num(m.build.talents[t].rank)
+			end
+			if ranks > 0 then
+				Add("  Talents  " .. tostring(math.floor(ranks)) .. " pts", 0.8, 0.8, 0.7)
+			end
+		end
+		Coop.WriteMemberSections(Add, m, lineY)
+	end
+	if type(co.fights) == "table" and table.getn(co.fights) > 0 then
+		Head("Boss fights")
+		for i = 1, table.getn(co.fights) do
+			local f = co.fights[i]
+			local boss = "?"
+			if type(f.bosses) == "table" and table.getn(f.bosses) > 0 then
+				boss = f.bosses[1]
+				local b
+				for b = 2, table.getn(f.bosses) do
+					boss = boss .. ", " .. f.bosses[b]
+				end
+			end
+			Add(" ", 1, 1, 1)
+			Add(Clock(f.start) .. "  " .. boss .. "  " .. Short(f.dmg), 1, 0.82, 0.55)
+			if type(f.heroes) == "table" then
+				local h
+				for h = 1, table.getn(f.heroes) do
+					local hero = f.heroes[h]
+					local hex = "e6e0cc"
+					local br, bg, bb = 0.7, 0.65, 0.55
+					local mi
+					for mi = 1, table.getn(members) do
+						local m = members[mi]
+						if m.id == hero.id or m.name == hero.name then
+							br, bg, bb = Coop.ClassRGB(m.class, shades[m.id] or 0)
+							hex = Coop.HexRGB(br, bg, bb)
+							break
+						end
+					end
+					local at = Add(
+						"  |cff" .. hex .. (hero.name or "?") .. "|r  " .. Short(hero.dmg) .. "  " .. Pct(hero.share),
+						0.9, 0.88, 0.8)
+					if at and Options.PopBar and type(lineY) == "table" then
+						Options.PopBar(at, hero.share, br, bg, bb, lineY[at])
+					end
+				end
+			end
+		end
+	end
+	if type(co.events) == "table" and table.getn(co.events) > 0 then
+		Head("Downs / revives")
+		for i = 1, table.getn(co.events) do
+			local e = co.events[i]
+			local line = Clock(e.t) .. "  "
+			local r, g, b = 0.82, 0.8, 0.72
+			if e.kind == "downed" then
+				line = line .. "You went down"
+				r, g, b = 1, 0.55, 0.55
+			elseif e.kind == "frienddown" then
+				line = line .. (e.who ~= "" and e.who or "Friend") .. " went down"
+				r, g, b = 1, 0.55, 0.55
+			elseif e.kind == "revived" then
+				line = line .. "Revived"
+				if e.by ~= "" then line = line .. " by " .. e.by end
+				r, g, b = 0.55, 0.85, 0.65
+			else
+				line = line .. tostring(e.kind)
+			end
+			Add(line, r, g, b)
+		end
+	end
+end
+
+-- OpenBuild is at the 32-upvalue limit; reach party rendering through Options.
+Options.WritePartyDetails = function(Add, Head, Line, Bit, rec, lineY, sheet)
+	Coop.WriteDetails(Add, Head, Line, Bit, rec, lineY, sheet)
+end
+
+-- Talent line for Details Character (solo + co-op). Same label as Party rows.
+Options.WriteTalentLine = function(Add, sheet, rec)
+	if type(Add) ~= "function" then return end
+	local class = ""
+	if type(rec) == "table" and type(rec.class) == "string" then class = rec.class end
+	if class == "" and type(sheet) == "table" and type(sheet.class) == "string" then
+		class = sheet.class
+	end
+	local build = nil
+	-- Co-op: your saved member build is the best source (meter ranks + treeKey).
+	if type(rec) == "table" and type(rec.co) == "table" and type(Coop.Members) == "function" then
+		local members = Coop.Members(rec.co)
+		local i
+		for i = 1, table.getn(members) do
+			local m = members[i]
+			if type(m) == "table" and m.isLocal == 1 and type(m.build) == "table" then
+				build = m.build
+				if type(m.class) == "string" and m.class ~= "" then class = m.class end
+				break
+			end
+		end
+	end
+	if not build and type(sheet) == "table" then
+		build = { talents = sheet.talents, points = sheet.points }
+	end
+	if (not build or (type(build.talents) ~= "table" and type(build.points) ~= "table"))
+		and type(rec) == "table" and type(rec.cache) == "table" then
+		build = rec.cache
+	end
+	if (not build or (type(build.talents) ~= "table" and type(build.points) ~= "table"))
+		and type(rec) == "table" and type(rec.atEnd) == "table" then
+		build = rec.atEnd
+	end
+	if type(build) ~= "table" then return end
+	if type(Coop.RefreshPoints) == "function" then
+		Coop.RefreshPoints(build, class, true)
+	end
+	local pts = 0
+	if type(Coop.PointsTotal) == "function" then pts = Coop.PointsTotal(build.points) end
+	if pts <= 0 then return end
+	-- Hide talent-frame stubs (e.g. 1/1/0) when no meter talent keys were saved.
+	if pts <= 3 and type(build.talents) == "table" then
+		local hasMeter = false
+		local i
+		for i = 1, table.getn(build.talents) do
+			local k = build.talents[i] and build.talents[i].key
+			if type(k) == "string" and string.find(k, "^talent:") then
+				hasMeter = true
+				break
+			end
+		end
+		if not hasMeter then return end
+	end
+	if type(Coop.TalentLabel) ~= "function" then return end
+	local label = Coop.TalentLabel(build.points, class)
+	if type(label) ~= "string" or label == "" then return end
+	Add(label, 0.85, 0.82, 0.65)
 end
 
 local function TimeText(row)
@@ -3331,6 +5022,10 @@ local function PopBar(i, share, r, g, b, yTop)
 	bar:Show()
 end
 
+-- Party view reaches these through Options (OpenBuild upvalue ceiling).
+Options.BarColor = BarColor
+Options.PopBar = PopBar
+
 local popIconN = 0
 
 local function HidePopIcons()
@@ -3358,7 +5053,7 @@ local function PopIcon(i, path, yTop)
 	tex:Show()
 end
 
-local function WriteCharacter(Add, Head, sheet)
+local function WriteCharacter(Add, Head, sheet, rec)
 	Head("Character")
 	local showAll = RunStatsDB and RunStatsDB.allStats == 1
 	local function Bit(label, value, color, raw, extra)
@@ -3432,6 +5127,9 @@ local function WriteCharacter(Add, Head, sheet)
 		end
 		Line(dotStacks, Bit("DoT haste", PlusPct(sheet.doth), "6edc9a", sheet.doth))
 	end
+	if Options.WriteTalentLine then
+		Options.WriteTalentLine(Add, sheet, rec)
+	end
 end
 
 local function OpenBuild(btn)
@@ -3450,7 +5148,12 @@ local function OpenBuild(btn)
 	if Options.frame and Options.frame:IsShown() then Options.frame:Hide() end
 	local sheet = btn.sheet
 	local title = "Run details"
-	if btn.rec then
+	if btn.partyOnly == 1 then
+		title = "Party"
+		if btn.rec and type(btn.rec.zname) == "string" and btn.rec.zname ~= "" then
+			title = "Party · " .. btn.rec.zname
+		end
+	elseif btn.rec then
 		local who = btn.rec.cname or btn.rec.class or ""
 		local where = btn.rec.zname or ""
 		if who ~= "" and where ~= "" then
@@ -3465,12 +5168,19 @@ local function OpenBuild(btn)
 	pop.rec = btn.rec
 	pop.view = btn
 	pop.detailsKey = Options.DetailsKey(btn)
-	if btn.rec and btn.rec.open == 1 then ApplyLastGraphs(sheet, btn.rec) end
-	if pop.hitBtn then
-		if Options.HitAbilityCount(sheet, btn.rec) >= 2 then
-			pop.hitBtn:Show()
-		else
-			pop.hitBtn:Hide()
+	if btn.rec and btn.rec.open == 1 and btn.partyOnly ~= 1 then ApplyLastGraphs(sheet, btn.rec) end
+	-- Use pop.* only — OpenBuild is at the 32-upvalue ceiling (no statBtn / Coop).
+	if btn.partyOnly == 1 then
+		if pop.statBtn then pop.statBtn:Hide() end
+		if pop.hitBtn then pop.hitBtn:Hide() end
+	else
+		if pop.statBtn then pop.statBtn:Show() end
+		if pop.hitBtn then
+			if Options.HitAbilityCount(sheet, btn.rec) >= 2 then
+				pop.hitBtn:Show()
+			else
+				pop.hitBtn:Hide()
+			end
 		end
 	end
 	HidePopBars()
@@ -3560,7 +5270,6 @@ local function OpenBuild(btn)
 		if n > 0 then Add(" ", 1, 1, 1) end
 		Add(text, 1, 0.82, 0)
 	end
-	Head("Run")
 	local function Bit(label, value, color)
 		return "|cffb3a78a" .. label .. "|r |cff" .. color .. value .. "|r"
 	end
@@ -3577,6 +5286,37 @@ local function OpenBuild(btn)
 		Join(d)
 		if text ~= "" then Add(text, 1, 1, 1) end
 	end
+
+	-- Party-only view: no Run / Character / Spells duplicate — just party data.
+	if btn.partyOnly == 1 then
+		if Options.WritePartyDetails then
+			Options.WritePartyDetails(Add, Head, Line, Bit, btn.rec, lineY, btn.sheet)
+		else
+			Add("No party data.", 0.7, 0.7, 0.65)
+		end
+		HidePopLines(n + 1)
+		popChild:SetHeight(y + 8)
+		local view = 360
+		local maxScroll = popChild:GetHeight() - view
+		if maxScroll < 1 then maxScroll = 1 end
+		if popSlider then
+			popSlider.busy = 1
+			popSlider:SetMinMaxValues(0, maxScroll)
+			popSlider:SetValue(0)
+			popSlider.busy = nil
+		end
+		if popScroll then popScroll:SetVerticalScroll(0) end
+		if frame then
+			pop:ClearAllPoints()
+			pop:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 0)
+		end
+		pop:Show()
+		pop:Raise()
+		if ask and ask:IsShown() then ask:Raise() end
+		return
+	end
+
+	Head("Run")
 	local race = btn.race or ""
 	Line(Bit("Date", Options.WhenText(btn.rec), "bfc4c8"))
 	Line(
@@ -3663,7 +5403,7 @@ local function OpenBuild(btn)
 		Add("|cff9a9078-|r", 1, 1, 1)
 	end
 
-	WriteCharacter(Add, Head, sheet)
+	WriteCharacter(Add, Head, sheet, btn.rec)
 
 	Head("Spells")
 	local spellN = 0
@@ -3673,10 +5413,11 @@ local function OpenBuild(btn)
 			local name = row.name or ""
 			if name ~= "" and not IsRacial(row.key, name) then
 				spellN = spellN + 1
-				Add(name .. "  " .. tostring(math.floor(Num(row.rank))), 0.85, 0.9, 1, row.icon)
+				Add(name .. "  |cffffd24a" .. tostring(math.floor(Num(row.rank))) .. "|r", 0.85, 0.9, 1, row.icon)
 				local upgrades = SpellTips.CleanTipBit(row.upgrades)
 				if upgrades ~= "" then
-					Add("  Upgrades: " .. upgrades, 0.7, 0.78, 0.55)
+					-- |cff so color sticks (SetTextColor alone reads too close to the name).
+					Add("  |cff7a9eb8Upgrades: " .. upgrades .. "|r", 1, 1, 1)
 				end
 			end
 		end
@@ -3700,7 +5441,8 @@ local function OpenBuild(btn)
 				if type(piece.stats) == "string" and piece.stats ~= "" then
 					local stats = string.gsub(piece.stats, "|n", " · ")
 					stats = string.gsub(stats, "\n", " · ")
-					Add("  " .. stats, 0.65, 0.78, 0.6)
+					stats = SpellTips.CleanTipBit(stats)
+					Add("  |cff7a9eb8" .. stats .. "|r", 1, 1, 1)
 				end
 			end
 		end
@@ -3916,7 +5658,7 @@ local function Refresh()
 		mapLabel = ctx.zname
 	end
 	local diff = ViewDiff(ctx)
-	sub:SetText(cname .. "  ·  " .. mapLabel .. "  ·  " .. DiffName(diff))
+	sub:SetText(Coop.Label() .. "  ·  " .. cname .. "  ·  " .. mapLabel .. "  ·  " .. DiffName(diff))
 	classBtn.label:SetText(Cap(cname, 14))
 	mapBtn.label:SetText(Cap(mapLabel, 14))
 	if diffBtn then diffBtn.label:SetText(DiffName(diff)) end
@@ -3926,6 +5668,20 @@ local function Refresh()
 			frame.paceBtn.label:SetText("Last min")
 		else
 			frame.paceBtn.label:SetText("Average")
+		end
+	end
+	if modeBtn then modeBtn.label:SetText(Coop.Label()) end
+	-- In co-op view the Race column shows who you ran with.
+	do
+		local ci
+		for ci = 1, table.getn(COLS) do
+			if COLS[ci].key == "race" then
+				if Coop.ViewMode() == "coop" then
+					COLS[ci].text = "With"
+				else
+					COLS[ci].text = "Race"
+				end
+			end
 		end
 	end
 
@@ -3955,7 +5711,11 @@ local function Refresh()
 				elseif col.key == "diff" then
 					text = item.diffName or ""
 				elseif col.key == "race" then
-					text = item.race or ""
+					if Coop.ViewMode() == "coop" then
+						text = Coop.WithText(item.rec)
+					else
+						text = item.race or ""
+					end
 				else
 					text = StatText(col.key, rates)
 				end
@@ -3980,6 +5740,8 @@ local function Refresh()
 					end
 				elseif col.key == "when" then
 					cell:SetTextColor(0.75, 0.78, 0.82)
+				elseif col.key == "race" and Coop.ViewMode() == "coop" then
+					cell:SetTextColor(0.7, 0.85, 1)
 				else
 					cell:SetTextColor(0.96, 0.93, 0.84)
 				end
@@ -3987,7 +5749,18 @@ local function Refresh()
 			row.btn.sheet = item.sheet
 			row.btn.race = item.race
 			row.btn.rec = item.rec
+			row.btn.partyOnly = nil
 			row.del.rec = item.rec
+			if row.party then
+				row.party.sheet = item.sheet
+				row.party.race = item.race
+				row.party.rec = item.rec
+				if item.rec and item.rec.party == 1 then
+					row.party:Show()
+				else
+					row.party:Hide()
+				end
+			end
 			row.holder.item = item
 			row.holder:Show()
 		else
@@ -3996,12 +5769,22 @@ local function Refresh()
 			row.btn.race = nil
 			row.btn.rec = nil
 			row.del.rec = nil
+			if row.party then
+				row.party.sheet = nil
+				row.party.race = nil
+				row.party.rec = nil
+				row.party:Hide()
+			end
 			row.holder:Hide()
 		end
 	end
 	local n = table.getn(list)
 	if n == 0 then
-		foot:SetText("No runs for this filter. Party runs stay hidden.")
+		if Coop.ViewMode() == "coop" then
+			foot:SetText("No co-op runs for this filter. Switch to Solo for solo history.")
+		else
+			foot:SetText("No solo runs for this filter. Switch to Co-op for party history.")
+		end
 		pageText:SetText("")
 	else
 		local last = start + CFG.PAGE
@@ -4041,6 +5824,14 @@ local function Toggle()
 	else
 		HideDiffMenu()
 		anchorCache = nil
+		-- Auto mode: open on Co-op while you are in a party, else Solo.
+		if not RunStatsDB.defMode or RunStatsDB.defMode == "auto" then
+			if Coop.LiveParty() then
+				RunStatsDB.coopView = 1
+			else
+				RunStatsDB.coopView = nil
+			end
+		end
 		local id = RunId()
 		local rec = id and FindRun(id)
 		if rec then
@@ -4075,6 +5866,13 @@ PaintHeaders = function()
 	local i
 	for i = 1, table.getn(headers) do
 		local key = headers[i].key
+		local c
+		for c = 1, table.getn(COLS) do
+			if COLS[c].key == key then
+				headers[i].label:SetText(COLS[c].text)
+				break
+			end
+		end
 		if key == sort then
 			headers[i].label:SetTextColor(1, 0.82, 0)
 		elseif last and (key == "kpm" or key == "xpm" or key == "gpm" or key == "dps") then
@@ -4413,6 +6211,7 @@ local function InspectCurrent()
 	TrackXp(rec)
 	Remember(rec, t)
 	NotePace(rec, t)
+	Coop.Note(rec, t, true)
 	NoteHits(rec)
 	TrackSpells(rec, t)
 	if rec.based ~= 1 then
@@ -4433,6 +6232,12 @@ local function InspectCurrent()
 	ApplyLastGraphs(sheet, rec)
 	rec.preview = sheet
 	rec.watched = 1
+	-- Mid-run co-op snapshot should open under the matching Solo/Co-op view.
+	if rec.party == 1 then
+		RunStatsDB.coopView = 1
+	else
+		RunStatsDB.coopView = nil
+	end
 	anchorCache = nil
 	Refresh()
 	OpenBuild({
@@ -4551,6 +6356,25 @@ local function BuildFilters()
 		"Save a snapshot of the run you are in right now.",
 		"It appears in the list (even under the min time) and opens Details.",
 		"Use it mid-run to check pace, meter, and build.")
+
+	modeBtn = MakeButton(frame, 64, 20)
+	modeBtn:SetPoint("RIGHT", liveBtn, "LEFT", -6, 0)
+	modeBtn.label:SetText("Solo")
+	modeBtn:SetScript("OnClick", function()
+		HideDiffMenu()
+		if RunStatsDB.coopView == 1 then
+			RunStatsDB.coopView = nil
+		else
+			RunStatsDB.coopView = 1
+		end
+		page = 1
+		anchorCache = nil
+		Refresh()
+	end)
+	Tip(modeBtn, "Solo / Co-op",
+		"Solo: only runs you played alone.",
+		"Co-op: only party runs, with roster and party stats.",
+		"Options can default this to Auto (follow your party state).")
 end
 
 local function BuildRows()
@@ -4602,23 +6426,43 @@ local function BuildRows()
 			cells[c] = fs
 		end
 		local del = MakeButton(holder, 22, 18)
-		del:SetPoint("RIGHT", holder, "RIGHT", -66, 0)
+		del:SetPoint("RIGHT", holder, "RIGHT", -126, 0)
 		del.label:SetText("X")
 		del:SetScript("OnClick", function() AskDelete(this.rec) end)
 		del:SetScript("OnEnter", function()
 			this:SetBackdropBorderColor(0.85, 0.25, 0.2, 1)
+		end)
+		local party = MakeButton(holder, 52, 18)
+		party:SetPoint("RIGHT", holder, "RIGHT", -70, 0)
+		party.label:SetText("Party")
+		party:Hide()
+		party:SetScript("OnClick", function()
+			pop.graphLast = nil
+			OpenBuild({
+				sheet = this.sheet,
+				race = this.race,
+				rec = this.rec,
+				partyOnly = 1,
+			})
+		end)
+		party:SetScript("OnEnter", function()
+			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
+		end)
+		party:SetScript("OnLeave", function()
+			this:SetBackdropBorderColor(0.55, 0.45, 0.2, 0.9)
 		end)
 		local btn = MakeButton(holder, 62, 18)
 		btn:SetPoint("RIGHT", holder, "RIGHT", -2, 0)
 		btn.label:SetText("Details")
 		btn:SetScript("OnClick", function()
 			pop.graphLast = nil
+			this.partyOnly = nil
 			OpenBuild(this)
 		end)
 		btn:SetScript("OnEnter", function()
 			this:SetBackdropBorderColor(1, 0.84, 0.3, 1)
 		end)
-		rows[r] = { holder = holder, cells = cells, btn = btn, del = del }
+		rows[r] = { holder = holder, cells = cells, btn = btn, del = del, party = party }
 	end
 end
 
@@ -4693,7 +6537,7 @@ end
 Options.Build = function()
 	Options.frame = CreateFrame("Frame", "RunStatsOptions", UIParent)
 	Options.frame:SetWidth(420)
-	Options.frame:SetHeight(548)
+	Options.frame:SetHeight(590)
 	-- DIALOG like Details so GameTooltip (TOOLTIP strata) can sit above this panel.
 	Options.frame:SetFrameStrata("DIALOG")
 	if Options.frame.SetFrameLevel then Options.frame:SetFrameLevel(20) end
@@ -5034,6 +6878,23 @@ Options.Build = function()
 		Options.ApplyDefaults()
 	end, "Pace: Last min", "Those rates for the final minute of the snapshot only.", "A dash means last minute was not saved.")
 
+	yLab = Options.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	yLab:SetPoint("TOPLEFT", Options.frame, "TOPLEFT", 14, -526)
+	yLab:SetTextColor(0.85, 0.8, 0.65)
+	yLab:SetText("Mode")
+	AddChoice("defMode", 70, -524, 58, "Auto", "auto", function(v)
+		RunStatsDB.defMode = v
+		Options.ApplyDefaults()
+	end, "Mode: Auto", "Open on Co-op while you are in a party, otherwise Solo.", "Also applied when a new run starts.")
+	AddChoice("defMode", 134, -524, 58, "Solo", "solo", function(v)
+		RunStatsDB.defMode = v
+		Options.ApplyDefaults()
+	end, "Mode: Solo", "Always start on the Solo list.", "Co-op runs stay in the Co-op view.")
+	AddChoice("defMode", 198, -524, 58, "Co-op", "coop", function(v)
+		RunStatsDB.defMode = v
+		Options.ApplyDefaults()
+	end, "Mode: Co-op", "Always start on the Co-op list.", "Solo runs stay in the Solo view.")
+
 	Options.PaintMarks()
 end
 
@@ -5047,6 +6908,7 @@ Options.Paint = function()
 		defDiff = RunStatsDB.defDiff or "current",
 		defWindow = RunStatsDB.defWindow or "endless",
 		defPace = RunStatsDB.defPace or "average",
+		defMode = RunStatsDB.defMode or "auto",
 	}
 	local key, list
 	for key, list in pairs(Options.frame.groups) do
@@ -5293,6 +7155,7 @@ local function BuildDetails()
 		end)
 	end
 	statBtn = MakeButton(pop, 76, 18)
+	pop.statBtn = statBtn
 	statBtn:SetPoint("LEFT", popDel, "RIGHT", 4, 0)
 	if RunStatsDB and RunStatsDB.allStats == 1 then
 		statBtn.label:SetText("All stats")
@@ -5493,6 +7356,12 @@ end
 
 local Live = { sessionId = nil, lastPh = nil, elapsed = 0 }
 
+-- Tick is at the 32-upvalue ceiling; reach Coop through Live so Tick does not
+-- take another upvalue for the Coop table (or for NoteParty).
+Live.CoopNote = function(rec, t, force)
+	Coop.Note(rec, t, force)
+end
+
 local function SyncPop(rec)
 	if not rec or not pop or not pop:IsShown() or pop.rec ~= rec then return end
 	local sheet = rec.atEnd or rec.preview
@@ -5605,6 +7474,7 @@ local function Tick()
 		SyncPop(rec)
 	end
 	NoteMeter(rec, t)
+	if rec.open == 1 then Live.CoopNote(rec, t, false) end
 	NoteHits(rec)
 	TrackSpells(rec, t)
 	if SpellTips.pickDirty then
@@ -5802,6 +7672,10 @@ driver:SetScript("OnEvent", function()
 		ready = true
 	elseif event == "PLAYER_LOGIN" then
 		if not getglobal("RunStatsMinimapButton") then BuildMinimap() end
+		if AZS_RegisterBannerHandler and not Coop.bannerHooked then
+			local ok = pcall(AZS_RegisterBannerHandler, Coop.OnBanner)
+			if ok then Coop.bannerHooked = 1 end
+		end
 		if not told then
 			told = true
 			Say("loaded. /history opens the list. The minimap button opens it too.")
@@ -5827,6 +7701,10 @@ SlashCmdList["RUNSTATS"] = function(msg)
 	if string.sub(cmd, 1, 4) == "perf" then
 		local rest = string.gsub(string.sub(cmd, 5), "^%s+", "")
 		Perf.Command(rest)
+		return
+	end
+	if cmd == "coopdump" or cmd == "coop" then
+		Coop.Dump()
 		return
 	end
 	Toggle()
