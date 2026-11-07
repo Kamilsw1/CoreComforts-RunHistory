@@ -1711,17 +1711,38 @@ local function UpdateBossList()
 	bossList:Hide()
 end
 
+local function PaintCacheCount(index)
+	local row = rows[index]
+	if not row then return end
+	local count = Count(Chests())
+	local nameR, nameG, nameB = 0.55, 0.85, 0.5
+	local numR, numG, numB = 0.75, 0.95, 0.6
+	if count < 1 then
+		nameR, nameG, nameB = 1, 0.35, 0.3
+		numR, numG, numB = 1, 0.42, 0.32
+	end
+	row.name:SetText("Caches on map")
+	row.name:SetTextColor(nameR, nameG, nameB)
+	row.name:Show()
+	row.status:SetText(string.format("%.0f", count))
+	row.status:SetTextColor(numR, numG, numB)
+	row.status:Show()
+end
+
 local function UpdateList()
 	if not On("list") or not (InRun() or Staging()) then
 		list:Hide()
 		return
 	end
+	local showCaches = On("listcaches")
+	local cap = ROWS
+	if showCaches then cap = ROWS - 1 end
 	local lairs = Lairs()
 	local n = Count(lairs)
 	local shown = 0
 	local r
 	for r = 1, n do
-		if shown >= ROWS then break end
+		if shown >= cap then break end
 		local lair = lairs[r]
 		if type(lair) == "table" then
 			shown = shown + 1
@@ -1729,6 +1750,7 @@ local function UpdateList()
 			local label = lair.name
 			if type(label) ~= "string" or label == "" then label = "Guardian" end
 			row.name:SetText(label)
+			row.name:SetTextColor(1, 1, 1)
 			row.name:Show()
 			if Living(lair) then
 				if lair.state == "awake" then
@@ -1755,31 +1777,31 @@ local function UpdateList()
 			row.status:Show()
 		end
 	end
+	if shown < 1 and Staging() and rows[1] then
+		shown = 1
+		rows[1].name:SetText("Guardian")
+		rows[1].name:SetTextColor(1, 1, 1)
+		rows[1].name:Show()
+		rows[1].status:SetText("--")
+		rows[1].status:SetTextColor(0.8, 0.8, 0.8)
+		rows[1].status:Show()
+	end
+	local last = shown
+	if showCaches and shown < ROWS then
+		last = shown + 1
+		PaintCacheCount(last)
+	end
 	local extra
-	for extra = shown + 1, ROWS do
+	for extra = last + 1, ROWS do
 		rows[extra].name:Hide()
 		rows[extra].status:Hide()
 	end
-	if shown < 1 then
-		if Staging() and rows[1] then
-			rows[1].name:SetText("Guardian")
-			rows[1].name:Show()
-			rows[1].status:SetText("--")
-			rows[1].status:SetTextColor(0.8, 0.8, 0.8)
-			rows[1].status:Show()
-			for extra = 2, ROWS do
-				rows[extra].name:Hide()
-				rows[extra].status:Hide()
-			end
-			list:Show()
-			list:SetHeight(29)
-			return
-		end
+	if last < 1 then
 		list:Hide()
 		return
 	end
 	list:Show()
-	list:SetHeight(16 + shown * 13)
+	list:SetHeight(16 + last * 13)
 end
 
 ----------------------------------------------------------------
@@ -4680,7 +4702,8 @@ local optionKeys = {
 	{ header = "Statistics", col = 2 },
 	{ key = "stats", label = "Kill, XP, and gold per minute", tip = "The first number is the last 60 seconds.|Average is the pace for the whole run.|Pauses, level-up picks, and cache picks are left out." },
 	{ key = "alive", label = "Alive enemies" },
-	{ key = "list", label = "Guardian timers" },
+	{ key = "list", label = "Guardian timers", tip = "Each guardian lair and how long until it fills." },
+	{ key = "listcaches", parent = "list", label = "Caches on map", tip = "Adds a line for how many caches are waiting on the map.|The line is red when that number is 0." },
 	{ key = "bosslist", label = "Boss list", tip = "Upcoming bosses as countdown bars.|When a boss spawns, its row becomes a health bar instead of vanishing." },
 	{ header = "Core Comfort Tooltips", col = 2 },
 	{ key = "itemtips", label = "Enable item tooltips", tip = "Tooltip on the item icons beside the boss list.|Turn this off to hide those.|The armory always keeps its tooltips.|Tips in this options window always stay." },
