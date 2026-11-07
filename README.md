@@ -8,7 +8,7 @@ Boss and guardian health bars, with debuffs and an estimate of damage over time.
 
 ### Direction arrows, tally, and jewelry
 
-Direction arrows for a cache and a guardian. Kill count, gold, and caches. The cache number turns green when you can afford one and red when you cannot. The number in parentheses is how many caches you can afford right now. Equipped jewelry is shown above the bar.
+Direction arrows for a cache and a guardian. The cache arrow shows how many you can open. When every guardian is dead, the arrow turns blue and shows the time until the next one. Kill count, gold, and caches. The cache number turns green when you can afford one and red when you cannot. Equipped jewelry is shown above the bar.
 
 ![Direction arrows, tally line, and equipped jewelry](screenshots/hud.png)
 
