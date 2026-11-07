@@ -1,6 +1,6 @@
 -- Core Comforts
 -- Full target health, kill / gold / cache, guardian timers,
--- and minimap pins plus arrows for waiting bosses and caches.
+-- and minimap pins plus arrows for waiting bosses, the next spawn, and caches.
 -- Spell tooltips can show the cooldown with more decimal places.
 -- WoW 1.12 / Lua 5.0. Drag the list to move it. /cc or the minimap button opens options. /cc reset parks it.
 
@@ -2021,6 +2021,7 @@ local function MakeGuide(name, iconPath, x, leftKey, topKey, title, texCoord)
 		caption:SetTextColor(0.93, 0.8, 0.53)
 		caption:SetShadowColor(0, 0, 0, 1)
 		caption:SetShadowOffset(1, -1)
+		guide.caption = caption
 		local textW = caption:GetStringWidth()
 		local guess = string.len(title) * 6
 		if not textW or textW < guess then textW = guess end
@@ -2037,6 +2038,17 @@ local function MakeGuide(name, iconPath, x, leftKey, topKey, title, texCoord)
 	guide.icon = icon
 	guide.arrow = arrow
 	guide.dist = dist
+	if named then
+		local timer = guide:CreateFontString(nil, "OVERLAY")
+		timer:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
+		timer:SetTextColor(0.55, 0.9, 1)
+		timer:SetShadowColor(0, 0, 0, 1)
+		timer:SetShadowOffset(1, -1)
+		timer:SetPoint("LEFT", arrow, "RIGHT", 1, 0)
+		timer:Hide()
+		guide.timer = timer
+	end
+	guide.baseWidth = guide:GetWidth()
 	guide:SetScript("OnDragStart", function()
 		if Locked() then return end
 		this:StartMoving()
@@ -2093,6 +2105,43 @@ local function EnsureGuides()
 	RestoreGuide(guides.cache)
 end
 
+local function StyleGuide(guide, pending)
+	local br, bg, bb, ba = 0.85, 0.75, 0.4, 0.55
+	local cr, cg, cb = 0.93, 0.8, 0.53
+	local dr, dg, db = 1, 0.96, 0.85
+	local ar, ag, ab = 1, 1, 1
+	if not guide.named then
+		dr, dg, db = 1, 0.9, 0.6
+	end
+	if pending then
+		br, bg, bb, ba = 0.35, 0.72, 1, 0.95
+		cr, cg, cb = 0.55, 0.86, 1
+		dr, dg, db = 0.7, 0.9, 1
+		ar, ag, ab = 0.45, 0.82, 1
+	end
+	guide:SetBackdropBorderColor(br, bg, bb, ba)
+	if guide.icon then guide.icon:SetVertexColor(ar, ag, ab) end
+	if guide.arrow then guide.arrow:SetVertexColor(ar, ag, ab) end
+	if guide.caption then guide.caption:SetTextColor(cr, cg, cb) end
+	if guide.dist then guide.dist:SetTextColor(dr, dg, db) end
+	if guide.timer then
+		if pending then
+			guide.timer:Show()
+		else
+			guide.timer:Hide()
+		end
+	end
+	if guide.baseWidth then
+		local extra = 0
+		if pending and guide.timer then
+			extra = 40
+			local textW = guide.timer:GetStringWidth()
+			if textW and textW + 10 > extra then extra = textW + 10 end
+		end
+		guide:SetWidth(guide.baseWidth + extra)
+	end
+end
+
 local function PointGuide(guide, best)
 	if not guide then return end
 	if not best then
@@ -2113,6 +2162,14 @@ local function PointGuide(guide, best)
 	else
 		guide.dist:SetText(string.format("%.0f", best.yards))
 	end
+	if guide.timer then
+		if best.pending then
+			guide.timer:SetText(Clock(best.left or 0))
+		else
+			guide.timer:SetText("")
+		end
+	end
+	StyleGuide(guide, best.pending)
 	guide:Show()
 end
 
@@ -2121,6 +2178,20 @@ local function Consider(best, east, north, yards, name, texture)
 	if not best or yards < best.yards then
 		return { east = east, north = north, yards = yards, name = name, texture = texture }
 	end
+	return best
+end
+
+-- Soonest empty lair. A later lair wins only when it fills with this one
+-- (within 0.75s) and stands closer.
+local function ConsiderSpawn(best, east, north, yards, name, texture, left)
+	if not yards or not left or left < 0 then return best end
+	local pick = {
+		east = east, north = north, yards = yards,
+		name = name, texture = texture, left = left, pending = true
+	}
+	if not best then return pick end
+	if left < best.left - 0.75 then return pick end
+	if math.abs(left - best.left) <= 0.75 and yards < best.yards then return pick end
 	return best
 end
 
@@ -2155,6 +2226,8 @@ local function UpdateMap()
 
 	local nearestGuard
 	local nearestCache
+	local nextSpawn
+	local anyLiving
 	local lairs = Lairs()
 	local n = Count(lairs)
 	local r
@@ -2165,13 +2238,17 @@ local function UpdateMap()
 			local label = lair.name
 			if type(label) ~= "string" or label == "" then label = "Guardian" end
 			local texture = TEX_BOSS_WAIT
+			local living = Living(lair)
 			if lair.state == "awake" then
 				texture = TEX_BOSS_COMBAT
-			elseif Living(lair) then
+			elseif living then
 				texture = TEX_BOSS_ALIVE
 			end
+			if living then anyLiving = true end
 			if lair.state == "asleep" then
 				nearestGuard = Consider(nearestGuard, east, north, yards, label, TEX_BOSS_ALIVE)
+			elseif not living then
+				nextSpawn = ConsiderSpawn(nextSpawn, east, north, yards, label, TEX_BOSS_WAIT, Num(lair.left))
 			end
 			if On("guardpins") and east then
 				local timer
@@ -2220,7 +2297,11 @@ local function UpdateMap()
 
 	if On("guardarrow") or On("cachearrow") then EnsureGuides() end
 	if guides.guardian then
-		if On("guardarrow") then PointGuide(guides.guardian, nearestGuard) else guides.guardian:Hide() end
+		local guardTarget = nearestGuard
+		if not guardTarget and not anyLiving and On("guardspawn") then
+			guardTarget = nextSpawn
+		end
+		if On("guardarrow") then PointGuide(guides.guardian, guardTarget) else guides.guardian:Hide() end
 	end
 	if guides.cache then
 		if ShowCacheArrow() then PointGuide(guides.cache, nearestCache) else guides.cache:Hide() end
@@ -4588,6 +4669,7 @@ local optionKeys = {
 	{ key = "cachepins", label = "Cache icons" },
 	{ header = "Direction arrows", col = 1 },
 	{ key = "guardarrow", label = "Boss arrow", tip = "Points at the closest boss that is still waiting.|A boss already in combat is left off, since it leaves its spawn." },
+	{ key = "guardspawn", parent = "guardarrow", label = "Point at the next spawn", tip = "When every guardian is dead, the arrow points at the lair that fills first.|If several fill at the same time, it points at the closest of those.|The arrow turns blue and a timer sits beside it." },
 	{ key = "cachearrow", label = "Cache arrow" },
 	{ key = "cacheafford", parent = "cachearrow", label = "Only when you can afford one", tip = "Hides the cache arrow until your gold can pay for a cache.|That is the same number as Caches you can buy.|Turn this off to point at a cache even when you cannot buy it yet." },
 	{ header = "UI", col = 2, tab = 1 },
