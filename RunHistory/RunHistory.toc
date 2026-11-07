@@ -1,6 +1,6 @@
 ## Interface: 11200
 ## Title: Run History
-## Notes: Saves each run, with the date and optional mid-run snapshots, and compares kills per minute. /history
+## Notes: Saves solo and co-op runs, with the date and optional mid-run snapshots. /history
 ## Version: 0.4
 ## Author: Kamil
 ## SavedVariables: RunStatsDB

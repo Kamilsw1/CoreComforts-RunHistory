@@ -24,7 +24,7 @@ Direction arrows for a cache and a guardian. The cache arrow shows how many you 
 <p>Upcoming bosses, and the gear they drop. A mark shows whether you already own that piece, based on the armory collection in the addon.</p>
 <img src="screenshots/boss-list.png" alt="Boss list with owned drops marked" width="100%">
 <h3>Guardian timers</h3>
-<p>Each row shows whether that guardian is alive, in combat, or how long until it returns.</p>
+<p>Each row shows whether that guardian is alive, in combat, or how long until it returns. A last line can show how many caches are on the map.</p>
 <img src="screenshots/guardians.png" alt="Guardian timers" width="100%">
 </td>
 </tr>
@@ -57,7 +57,7 @@ Gear from each map and boss. It updates when you get a drop. The addon cannot re
 
 ## Run History
 
-Saves each run and compares kills per minute by class, map, difficulty, and spec. New runs also store the date and time. `/history` opens the window. Options are in that window.
+Saves each run and compares kills per minute by class, map, difficulty, and spec. New runs also store the date and time. Solo and co-op runs are listed apart. `/history` opens the window. Options are in that window.
 
 ### Run list
 
@@ -87,13 +87,11 @@ Damage taken, with each source's share, and pickups with the increase from that 
 
 ## What's new
 
-Core Comforts 0.3. The action bar shows how many seconds are left on each spell. It turns yellow under 5 seconds and red under 1 second. Stat places sets how many decimal places the character panel uses. It starts at the game's own rounding.
+Core Comforts 0.4. The boss arrow turns gold and says Alive while a guardian is up. When every guardian is dead, it points at the lair that fills first, turns blue, and shows the time left. If several fill at the same time, it points at the closest of those. The guardian list can show how many caches are on the map, in red when none are left. The cache arrow can show how many you can open. That number is the smaller of what your gold can pay for and what is on the map, and (0) is red. These start on.
 
-Run History 0.3. Each new run stores the date and time. Options can show it as day/month or month/day, with or without the year. Details shows the total upgrades on each spell, and what each jewelry piece does while equipped. The pickup list shows the increase from that rank. Damage done includes each ability's share of the damage in that snapshot.
+Run History 0.4. The list can show solo runs or co-op runs. It opens on co-op while you are in a party, and on solo otherwise. A co-op run saves the roster, each member's level and build, and each member's share of the party damage. Upgrade lines appear only when the meter saved the real text.
 
-Endless and the full run are always saved. The first install also saves snapshots at 16, 18, and 20 minutes. You can change those in Options, up to 6 marks, from 1 to 60 minutes. A mark is saved only when a new run reaches that time.
-
-Runs saved before this version stay in the list. They do not gain a date, upgrade lines, jewelry effects, or a damage share. A dash means that detail was not recorded.
+Runs saved before this version stay in the list. A co-op run from before this version has no roster. A dash means that detail was not recorded.
 
 ## Install
 

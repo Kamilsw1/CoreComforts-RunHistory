@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: Core Comforts
-## Notes: Full target health and resource, a kill/gold/cache line, guardian timers, minimap pins and arrows, an armory, and action bar cooldown timers.
-## Version: 0.3
+## Notes: Full target health and resource, a kill/gold/cache line, guardian timers, arrows for guardians and caches, an armory, and action bar cooldown timers.
+## Version: 0.4
 ## Author: Kamil
 ## SavedVariables: CoreComfortsDB
 ArmoryData.lua
